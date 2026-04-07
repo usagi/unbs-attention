@@ -1,0 +1,18 @@
+<bg xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xsi:schemaLocation='https://monkeymanboy.github.io/BSML-Docs/ https://raw.githubusercontent.com/monkeymanboy/BSML-Docs/gh-pages/BSMLSchema.xsd'>
+  <vertical spacing='1'>
+    <text text='購読URL一覧 (スクロール)' font-size='3.8' />
+    <vertical spacing='2' pad='2' bg='round-rect-panel' bg-color='#00000080'>
+      <page-button event-click='source-list#PageUp' direction='Up' />
+      <list id='source-list' select-cell='source-selected' />
+      <page-button event-click='source-list#PageDown' direction='Down' />
+    </vertical>
+    <horizontal spacing='1'>
+      <button text='選択URLを開く' on-click='OpenSelectedSource' />
+      <button text='選択URLを削除' on-click='RemoveSelectedSource' />
+    </horizontal>
+    <button text='クリップボードから購読URLを追加' on-click='AddSourceFromClipboard' />
+    <text text='~RefreshFailDetails' font-size='2.5' word-wrapping='true' />
+
+    <text text='使い方: URL追加 -> 更新 -> 表示カテゴリをON' font-size='3.1' />
+  </vertical>
+</bg>

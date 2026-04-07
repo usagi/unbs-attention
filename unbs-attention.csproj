@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+ <PropertyGroup>
+  <TargetFramework>net472</TargetFramework>
+  <LangVersion>latest</LangVersion>
+  <Nullable>enable</Nullable>
+  <ImplicitUsings>disable</ImplicitUsings>
+  <RootNamespace>UnbsAttention</RootNamespace>
+  <AssemblyName>UnbsAttention</AssemblyName>
+  <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  <EnableBsipa Condition="'$(EnableBsipa)' == ''">false</EnableBsipa>
+  <BsipaLibDir Condition="'$(BsipaLibDir)' == ''">$(MSBuildThisFileDirectory)Libs</BsipaLibDir>
+  <DefineConstants>$(DefineConstants);UNBS_CORE</DefineConstants>
+ </PropertyGroup>
+
+ <PropertyGroup Condition="'$(EnableBsipa)' == 'true'">
+  <DefineConstants>$(DefineConstants);UNBS_BSIPA</DefineConstants>
+ </PropertyGroup>
+
+ <ItemGroup>
+  <PackageReference Include="System.Net.Http" Version="4.3.4" />
+  <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+ </ItemGroup>
+
+ <ItemGroup>
+    <EmbeddedResource Include="manifest.json">
+     <ManifestResourceName>UnbsAttention.manifest.json</ManifestResourceName>
+     <LogicalName>UnbsAttention.manifest.json</LogicalName>
+    </EmbeddedResource>
+   <EmbeddedResource Include="src\UI\Settings.Left.bsml">
+    <ManifestResourceName>UnbsAttention.UI.Settings.Left.bsml</ManifestResourceName>
+    <LogicalName>UnbsAttention.UI.Settings.Left.bsml</LogicalName>
+   </EmbeddedResource>
+   <EmbeddedResource Include="src\UI\Settings.Sources.bsml">
+    <ManifestResourceName>UnbsAttention.UI.Settings.Sources.bsml</ManifestResourceName>
+    <LogicalName>UnbsAttention.UI.Settings.Sources.bsml</LogicalName>
+    </EmbeddedResource>
+ </ItemGroup>
+
+ <ItemGroup Condition="'$(EnableBsipa)' == 'true'">
+   <Reference Include="BSML">
+    <HintPath>$(BsipaLibDir)\..\..\Plugins\BSML.dll</HintPath>
+    <Private>false</Private>
+   </Reference>
+  <Reference Include="IPA.Loader">
+   <HintPath>$(BsipaLibDir)\IPA.Loader.dll</HintPath>
+   <Private>false</Private>
+  </Reference>
+   <Reference Include="HMUI">
+    <HintPath>$(BsipaLibDir)\HMUI.dll</HintPath>
+    <Private>false</Private>
+   </Reference>
+   <Reference Include="BeatSaber.ViewSystem">
+    <HintPath>$(BsipaLibDir)\BeatSaber.ViewSystem.dll</HintPath>
+    <Private>false</Private>
+   </Reference>
+   <Reference Include="Main">
+    <HintPath>$(BsipaLibDir)\Main.dll</HintPath>
+    <Private>false</Private>
+   </Reference>
+  <Reference Include="UnityEngine.CoreModule">
+   <HintPath>$(BsipaLibDir)\UnityEngine.CoreModule.dll</HintPath>
+   <Private>false</Private>
+  </Reference>
+  <Reference Include="UnityEngine.IMGUIModule">
+   <HintPath>$(BsipaLibDir)\UnityEngine.IMGUIModule.dll</HintPath>
+   <Private>false</Private>
+  </Reference>
+  <Reference Include="UnityEngine.InputLegacyModule">
+   <HintPath>$(BsipaLibDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+   <Private>false</Private>
+  </Reference>
+  <Reference Include="UnityEngine.TextRenderingModule">
+   <HintPath>$(BsipaLibDir)\UnityEngine.TextRenderingModule.dll</HintPath>
+   <Private>false</Private>
+  </Reference>
+ </ItemGroup>
+</Project>

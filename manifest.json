@@ -1,0 +1,11 @@
+{
+ "id": "UnbsAttention",
+ "name": "UNBS Attention",
+ "author": "USAGI.NETWORK",
+ "version": "0.1.0",
+ "description": "Beat Saber attention warning display with spreadsheet subscriptions.",
+ "gameVersion": "1.40.8",
+ "dependsOn": {
+  "BSIPA": "^4.3.5"
+ }
+}

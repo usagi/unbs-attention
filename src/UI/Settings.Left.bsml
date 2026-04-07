@@ -1,0 +1,65 @@
+<bg xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xsi:schemaLocation='https://monkeymanboy.github.io/BSML-Docs/ https://raw.githubusercontent.com/monkeymanboy/BSML-Docs/gh-pages/BSMLSchema.xsd'>
+  <vertical spacing='1'>
+    <horizontal spacing='1'>
+      <button text='General' on-click='ShowGeneralTab' />
+      <button text='Prefix' on-click='ShowPrefixTab' />
+      <button text='Position' on-click='ShowPositionTab' />
+    </horizontal>
+
+    <toggle-setting text='Enabled' value='Enabled' active='~GeneralTabActive' />
+
+    <text text='Attention Categories' font-size='3.8' active='~GeneralTabActive' />
+    <toggle-setting text='Mute' value='ShowMute' active='~GeneralTabActive' />
+    <toggle-setting text='Not For Streaming' value='ShowNotForStreaming' active='~GeneralTabActive' />
+    <toggle-setting text='Not For Video' value='ShowNotForVideo' active='~GeneralTabActive' />
+    <toggle-setting text='Stage Gimmick' value='ShowStageGimmick' active='~GeneralTabActive' />
+    <toggle-setting text='Phobia' value='ShowPhobia' active='~GeneralTabActive' />
+    <toggle-setting text='Jumpscare' value='ShowJumpscare' active='~GeneralTabActive' />
+    <toggle-setting text='Heavy' value='ShowHeavy' active='~GeneralTabActive' />
+    <toggle-setting text='Other' value='ShowOther' active='~GeneralTabActive' />
+
+    <button text='今すぐ更新' on-click='RefreshNow' active='~GeneralTabActive' />
+    <text text='~ReportText' font-size='3.0' font-align='Center' active='~GeneralTabActive' />
+    <text text='~LastMessage' font-size='3.0' active='~GeneralTabActive' />
+
+    <text text='Category Prefixes' font-size='3.8' active='~PrefixTabActive' />
+    <string-setting text='Mute prefix' value='PrefixMute' apply-on-change='true' active='~PrefixTabActive' />
+    <string-setting text='Not For Streaming prefix' value='PrefixNotForStreaming' apply-on-change='true' active='~PrefixTabActive' />
+    <string-setting text='Not For Video prefix' value='PrefixNotForVideo' apply-on-change='true' active='~PrefixTabActive' />
+    <string-setting text='Stage Gimmick prefix' value='PrefixStageGimmick' apply-on-change='true' active='~PrefixTabActive' />
+    <string-setting text='Phobia prefix' value='PrefixPhobia' apply-on-change='true' active='~PrefixTabActive' />
+    <string-setting text='Jumpscare prefix' value='PrefixJumpscare' apply-on-change='true' active='~PrefixTabActive' />
+    <string-setting text='Heavy prefix' value='PrefixHeavy' apply-on-change='true' active='~PrefixTabActive' />
+    <string-setting text='Other prefix' value='PrefixOther' apply-on-change='true' active='~PrefixTabActive' />
+    <text text='~LastMessage' font-size='3.0' active='~PrefixTabActive' />
+
+    <text text='Attention Position' font-size='3.6' active='~PositionTabActive' />
+
+    <vertical spacing='1' active='~PositionTabActive'>
+      <horizontal spacing='1' child-control-width='false' child-expand-width='false'>
+        <vertical pref-width='28'>
+          <button text='X -1' on-click='OffsetXMinus' />
+        </vertical>
+        <vertical pref-width='12'>
+          <text text='~PositionOffsetX' font-size='3.2' font-align='Center' />
+        </vertical>
+        <vertical pref-width='28'>
+          <button text='X +1' on-click='OffsetXPlus' />
+        </vertical>
+      </horizontal>
+
+      <horizontal spacing='1' child-control-width='false' child-expand-width='false'>
+        <vertical pref-width='28'>
+          <button text='Y -1' on-click='OffsetYMinus' />
+        </vertical>
+        <vertical pref-width='12'>
+          <text text='~PositionOffsetY' font-size='3.2' font-align='Center' />
+        </vertical>
+        <vertical pref-width='28'>
+          <button text='Y +1' on-click='OffsetYPlus' />
+        </vertical>
+      </horizontal>
+    </vertical>
+
+  </vertical>
+</bg>
