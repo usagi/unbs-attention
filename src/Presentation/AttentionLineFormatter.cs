@@ -26,19 +26,28 @@ public static class AttentionLineFormatter
 
  public static string Format(AttentionEntry entry, AttentionDisplayMode mode, IReadOnlyDictionary<string, string>? categoryPrefixes)
  {
-  var prefix = ResolvePrefix(entry.Category, categoryPrefixes);
+  return Format(entry.Category, entry.Reason, mode, categoryPrefixes);
+ }
+
+ public static string Format(
+  AttentionCategory category,
+  string? reason,
+  AttentionDisplayMode mode,
+  IReadOnlyDictionary<string, string>? categoryPrefixes)
+ {
+  var prefix = ResolvePrefix(category, categoryPrefixes);
 
   if (mode == AttentionDisplayMode.IconOnly)
   {
    return prefix;
   }
 
-  if (string.IsNullOrWhiteSpace(entry.Reason))
+  if (string.IsNullOrWhiteSpace(reason))
   {
    return prefix;
   }
 
-  return $"{prefix} {entry.Reason}";
+  return $"{prefix} {reason}";
  }
 
  private static string ResolvePrefix(AttentionCategory category, IReadOnlyDictionary<string, string>? categoryPrefixes)

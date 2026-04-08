@@ -20,6 +20,22 @@ public static class AttentionEntryValidator
    issues.Add("entry must have at least one target rule");
   }
 
+  if (entry.Target?.Bsr is not null)
+  {
+   foreach (var bsr in entry.Target.Bsr)
+   {
+    if (string.IsNullOrWhiteSpace(bsr))
+    {
+     continue;
+    }
+
+    if (!AttentionMatcherIndex.TryParseBsrHex(bsr, out _))
+    {
+     issues.Add("target.bsr contains non-hex value");
+    }
+   }
+  }
+
   if (!string.IsNullOrWhiteSpace(entry.Target?.InfoRegex) && !IsValidRegex(entry.Target!.InfoRegex!))
   {
    issues.Add("target.info_regex is invalid");
@@ -61,11 +77,34 @@ public static class AttentionEntryValidator
    return false;
   }
 
-  return HasAny(target.Bsr)
-   || HasAny(target.InfoIncludes)
-   || !string.IsNullOrWhiteSpace(target.InfoRegex)
-   || HasAny(target.DescIncludes)
-   || !string.IsNullOrWhiteSpace(target.DescRegex);
+  return HasAnyValidBsr(target.Bsr)
+ || HasAny(target.InfoIncludes)
+ || !string.IsNullOrWhiteSpace(target.InfoRegex)
+ || HasAny(target.DescIncludes)
+ || !string.IsNullOrWhiteSpace(target.DescRegex);
+ }
+
+ private static bool HasAnyValidBsr(IEnumerable<string>? values)
+ {
+  if (values is null)
+  {
+   return false;
+  }
+
+  foreach (var value in values)
+  {
+   if (string.IsNullOrWhiteSpace(value))
+   {
+    continue;
+   }
+
+   if (AttentionMatcherIndex.TryParseBsrHex(value, out _))
+   {
+    return true;
+   }
+  }
+
+  return false;
  }
 
  private static bool HasAny(IEnumerable<string>? values)

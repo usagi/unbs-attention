@@ -18,8 +18,12 @@ public sealed class AttentionPluginRuntime
  private HttpClient _httpClient = null!;
  private SubscriptionRefreshReport _lastRefreshReport = new();
  private readonly Dictionary<string, DescriptionCacheEntry> _descriptionCache = new(StringComparer.OrdinalIgnoreCase);
+ private readonly Dictionary<string, BsrByHashCacheEntry> _bsrByHashCache = new(StringComparer.OrdinalIgnoreCase);
  private readonly object _descriptionCacheGate = new();
  private DateTime _lastDescriptionCacheCleanupUtc = DateTime.MinValue;
+ private AttentionMatcherIndex _matcherIndex = AttentionMatcherIndex.Empty;
+ private readonly HashSet<AttentionCategory> _excludedCategoriesForMatching = new();
+ private bool _excludedCategoriesForMatchingDirty = true;
  private long _dataRevision;
 
  public void Init(PluginConfig config)
@@ -30,6 +34,7 @@ public sealed class AttentionPluginRuntime
   _store = new AttentionStore();
   _localDatabase = _store.LoadOrCreate(_config.AttentionJsonPath);
   _effectiveDatabase = BuildEffectiveDatabase(null);
+  RebuildMatcherIndex();
   var issues = AttentionEntryValidator.ValidateDatabase(_localDatabase);
   if (issues.Count > 0)
   {
@@ -83,7 +88,9 @@ public sealed class AttentionPluginRuntime
   var previousSignature = CreateSignature(_effectiveDatabase);
   var next = BuildEffectiveDatabase(remote);
   _effectiveDatabase = next;
+  RebuildMatcherIndex();
   Interlocked.Increment(ref _dataRevision);
+  InvalidateMatchingCaches();
   var nextSignature = CreateSignature(_effectiveDatabase);
   return string.Equals(previousSignature, nextSignature, StringComparison.Ordinal) ? 0 : 1;
  }
@@ -102,9 +109,15 @@ public sealed class AttentionPluginRuntime
  // 旧互換: levelId だけで引くシンプルAPI。
  public async Task<string?> BuildAttentionTextAsync(string levelId, CancellationToken cancellationToken)
  {
+  var normalizedLevelId = levelId?.Trim();
+  var bsrId = AttentionMatcherIndex.TryParseBsrHex(normalizedLevelId, out _)
+   ? normalizedLevelId
+   : null;
+
   var context = new AttentionLookupContext
   {
-   LevelId = levelId,
+   LevelId = normalizedLevelId,
+   BsrId = bsrId,
   };
 
   return await BuildAttentionTextAsync(context, cancellationToken).ConfigureAwait(false);
@@ -119,23 +132,17 @@ public sealed class AttentionPluginRuntime
   }
 
   string? result = null;
+  var excludedCategories = GetExcludedCategoriesForMatching();
 
-  if (ShouldResolveBeatSaverDescription(context))
-  {
-   var resolvedDescription = await TryResolveBeatSaverDescriptionAsync(context, cancellationToken).ConfigureAwait(false);
-   if (!string.IsNullOrWhiteSpace(resolvedDescription))
-   {
-    context.BeatSaverDescription = resolvedDescription;
-   }
-  }
+  await ResolveBeatSaverMetadataIfNeededAsync(context, excludedCategories, cancellationToken).ConfigureAwait(false);
 
   var canShow = await _visibilityPolicy.ShouldShowAsync(cancellationToken).ConfigureAwait(false);
   if (canShow)
   {
-   var matches = _effectiveDatabase.FindByContext(context, BuildExcludedCategoriesForMatching());
+   var matches = _matcherIndex.FindMatches(context, excludedCategories);
    if (matches.Count > 0)
    {
-    result = string.Join("\n", matches.Select(x => AttentionLineFormatter.Format(x, _config.DisplayMode, _config.CategoryPrefixes)));
+    result = string.Join("\n", matches.Select(x => AttentionLineFormatter.Format(x.Category, x.Reason, _config.DisplayMode, _config.CategoryPrefixes)));
    }
   }
 
@@ -222,6 +229,11 @@ public sealed class AttentionPluginRuntime
   return _config.Enabled;
  }
 
+ public bool GetDebugLoggingEnabled()
+ {
+  return _config.Debug;
+ }
+
  public bool SetEnabled(bool enabled)
  {
   if (_config.Enabled == enabled)
@@ -242,6 +254,7 @@ public sealed class AttentionPluginRuntime
   return new PluginConfig
   {
    Enabled = _config.Enabled,
+   Debug = _config.Debug,
    DisplayMode = _config.DisplayMode,
    AttentionCategories = new List<string>(_config.AttentionCategories ?? new List<string>()),
    CategoryPrefixes = new Dictionary<string, string>(_config.CategoryPrefixes ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase),
@@ -284,6 +297,7 @@ public sealed class AttentionPluginRuntime
   if (enabled && !exists)
   {
    _config.AttentionCategories.Add(name);
+   InvalidateMatchingCaches();
    return true;
   }
 
@@ -292,6 +306,7 @@ public sealed class AttentionPluginRuntime
    _config.AttentionCategories = _config.AttentionCategories
     .Where(x => !string.Equals(x, name, StringComparison.OrdinalIgnoreCase))
     .ToList();
+   InvalidateMatchingCaches();
    return true;
   }
 
@@ -501,6 +516,7 @@ public sealed class AttentionPluginRuntime
   NormalizeAttentionCategories();
   NormalizeCategoryPrefixes();
   NormalizeSpreadsheetSources();
+  InvalidateMatchingCaches();
  }
 
  private void NormalizeAttentionCategories()
@@ -524,6 +540,7 @@ public sealed class AttentionPluginRuntime
   }
 
   _config.AttentionCategories = normalized;
+  InvalidateMatchingCaches();
  }
 
  private static AttentionCategory? ParseCategoryName(string name)
@@ -598,15 +615,25 @@ public sealed class AttentionPluginRuntime
   return string.IsNullOrWhiteSpace(trimmed) ? "本当に？" : trimmed!;
  }
 
- private IReadOnlyList<string> BuildExcludedCategoriesForMatching()
+ private ISet<AttentionCategory> GetExcludedCategoriesForMatching()
  {
+  if (!_excludedCategoriesForMatchingDirty)
+  {
+   return _excludedCategoriesForMatching;
+  }
+
+  _excludedCategoriesForMatching.Clear();
   var enabled = new HashSet<string>(_config.AttentionCategories ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-  return Enum
-   .GetValues(typeof(AttentionCategory))
-   .Cast<AttentionCategory>()
-   .Select(x => x.ToString())
-   .Where(x => !enabled.Contains(x))
-   .ToList();
+  foreach (var category in Enum.GetValues(typeof(AttentionCategory)).Cast<AttentionCategory>())
+  {
+   if (!enabled.Contains(category.ToString()))
+   {
+    _excludedCategoriesForMatching.Add(category);
+   }
+  }
+
+  _excludedCategoriesForMatchingDirty = false;
+  return _excludedCategoriesForMatching;
  }
 
  private void RebuildSyncProvider()
@@ -632,96 +659,130 @@ public sealed class AttentionPluginRuntime
   return effective;
  }
 
- private bool ShouldResolveBeatSaverDescription(AttentionLookupContext context)
+ private void RebuildMatcherIndex()
  {
-  if (!string.IsNullOrWhiteSpace(context.BeatSaverDescription))
-  {
-   return false;
-  }
-
-  if (!HasEnabledDescriptionMatchers())
-  {
-   return false;
-  }
-
-  return !string.IsNullOrWhiteSpace(context.BsrId)
-   || TryExtractCustomLevelHash(context.LevelId) is { Length: > 0 };
+  _matcherIndex = AttentionMatcherIndex.Build(_effectiveDatabase);
  }
 
- private bool HasEnabledDescriptionMatchers()
+ private async Task ResolveBeatSaverMetadataIfNeededAsync(
+  AttentionLookupContext context,
+  ISet<AttentionCategory> excludedCategories,
+  CancellationToken cancellationToken)
  {
-  if (_effectiveDatabase is null)
+  var needsDescription = string.IsNullOrWhiteSpace(context.BeatSaverDescription)
+   && _matcherIndex.HasDescriptionRules(excludedCategories);
+  var needsBsr = string.IsNullOrWhiteSpace(context.BsrId)
+   && _matcherIndex.HasBsrRules(excludedCategories);
+
+  if (!needsDescription && !needsBsr)
   {
-   return false;
+   return;
   }
 
-  var enabledCategories = new HashSet<string>(_config.AttentionCategories ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-  return _effectiveDatabase.Entries.Any(entry =>
-   enabledCategories.Contains(entry.Category.ToString())
-  && entry.Target is AttentionTarget target
-   && (
-   (target.DescIncludes?.Any(x => !string.IsNullOrWhiteSpace(x)) ?? false)
-   || !string.IsNullOrWhiteSpace(target.DescRegex)
-   ));
- }
-
- private async Task<string?> TryResolveBeatSaverDescriptionAsync(AttentionLookupContext context, CancellationToken cancellationToken)
- {
   var bsr = context.BsrId?.Trim();
   if (!string.IsNullOrWhiteSpace(bsr))
   {
+   if (!needsDescription)
+   {
+    return;
+   }
+
    var bsrValue = bsr!;
    var bsrCacheKey = "bsr:" + bsrValue;
    if (TryGetCachedDescription(bsrCacheKey, out var cachedByBsr))
    {
     if (!string.IsNullOrWhiteSpace(cachedByBsr))
     {
-     return cachedByBsr;
+     context.BeatSaverDescription = cachedByBsr;
     }
+
+    return;
    }
-   else
+
+   try
    {
-    try
+    var byBsr = await _beatSaverMapClient.GetDescriptionByBsrIdAsync(bsrValue, cancellationToken).ConfigureAwait(false);
+    SetCachedDescription(bsrCacheKey, byBsr);
+    if (!string.IsNullOrWhiteSpace(byBsr))
     {
-     var byBsr = await _beatSaverMapClient.GetDescriptionByBsrIdAsync(bsrValue, cancellationToken).ConfigureAwait(false);
-     SetCachedDescription(bsrCacheKey, byBsr);
-     if (!string.IsNullOrWhiteSpace(byBsr))
-     {
-      return byBsr;
-     }
-    }
-    catch
-    {
-     // BeatSaver 取得失敗は握りつぶして、手元の情報だけで判定を続ける。
+     context.BeatSaverDescription = byBsr;
     }
    }
+   catch
+   {
+    // BeatSaver 取得失敗は握りつぶして、手元の情報だけで判定を続ける。
+   }
+
+   return;
   }
 
   var resolvedHash = TryExtractCustomLevelHash(context.LevelId)?.Trim();
   if (string.IsNullOrWhiteSpace(resolvedHash))
   {
-   return null;
+   return;
   }
 
   var hashValue = resolvedHash!;
 
-  var hashCacheKey = "hash:" + hashValue;
-  if (TryGetCachedDescription(hashCacheKey, out var cachedByHash))
+  if (needsBsr && TryGetCachedBsrByHash(hashValue, out var cachedBsr) && !string.IsNullOrWhiteSpace(cachedBsr))
   {
-   return cachedByHash;
+   context.BsrId = cachedBsr;
+   needsBsr = false;
+  }
+
+  var hashCacheKey = "hash:" + hashValue;
+  if (needsDescription && TryGetCachedDescription(hashCacheKey, out var cachedByHash))
+  {
+   if (!string.IsNullOrWhiteSpace(cachedByHash))
+   {
+    context.BeatSaverDescription = cachedByHash;
+    needsDescription = false;
+   }
+  }
+
+  if (!needsDescription && !needsBsr)
+  {
+   return;
   }
 
   try
   {
-   var byHash = await _beatSaverMapClient.GetDescriptionByHashAsync(hashValue, cancellationToken).ConfigureAwait(false);
-   SetCachedDescription(hashCacheKey, byHash);
-   return byHash;
+   var details = await _beatSaverMapClient.GetMapDetailsByHashAsync(hashValue, cancellationToken).ConfigureAwait(false);
+
+   var resolvedBsrId = details?.BsrId?.Trim();
+   SetCachedBsrByHash(hashValue, resolvedBsrId);
+   if (!string.IsNullOrWhiteSpace(resolvedBsrId))
+   {
+    context.BsrId = resolvedBsrId;
+   }
+
+   if (needsDescription)
+   {
+    var resolvedDescription = details?.Description;
+    SetCachedDescription(hashCacheKey, resolvedDescription);
+    if (!string.IsNullOrWhiteSpace(resolvedDescription))
+    {
+     context.BeatSaverDescription = resolvedDescription;
+    }
+   }
   }
   catch
   {
-   // BeatSaver 取得失敗は握りつぶして、手元の情報だけで判定を続ける。
-   return null;
+   if (needsDescription)
+   {
+    SetCachedDescription(hashCacheKey, null);
+   }
+
+   if (needsBsr)
+   {
+    SetCachedBsrByHash(hashValue, null);
+   }
   }
+ }
+
+ private void InvalidateMatchingCaches()
+ {
+  _excludedCategoriesForMatchingDirty = true;
  }
 
  private int GetDescriptionCacheTtlSeconds()
@@ -777,6 +838,54 @@ public sealed class AttentionPluginRuntime
   }
  }
 
+ private bool TryGetCachedBsrByHash(string hash, out string? bsrId)
+ {
+  bsrId = null;
+  var ttlSeconds = GetDescriptionCacheTtlSeconds();
+  if (ttlSeconds <= 0)
+  {
+   return false;
+  }
+
+  var now = DateTime.UtcNow;
+  lock (_descriptionCacheGate)
+  {
+   if (!_bsrByHashCache.TryGetValue(hash, out var entry))
+   {
+    return false;
+   }
+
+   if (entry.ExpiresAtUtc <= now)
+   {
+    _bsrByHashCache.Remove(hash);
+    return false;
+   }
+
+   entry.ExpiresAtUtc = now.AddSeconds(ttlSeconds);
+   bsrId = entry.BsrId;
+   return true;
+  }
+ }
+
+ private void SetCachedBsrByHash(string hash, string? bsrId)
+ {
+  var ttlSeconds = GetDescriptionCacheTtlSeconds();
+  if (ttlSeconds <= 0)
+  {
+   return;
+  }
+
+  var now = DateTime.UtcNow;
+  lock (_descriptionCacheGate)
+  {
+   _bsrByHashCache[hash] = new BsrByHashCacheEntry
+   {
+    BsrId = bsrId,
+    ExpiresAtUtc = now.AddSeconds(ttlSeconds),
+   };
+  }
+ }
+
  private void CleanupExpiredDescriptionCache()
  {
   var ttlSeconds = GetDescriptionCacheTtlSeconds();
@@ -789,6 +898,11 @@ public sealed class AttentionPluginRuntime
     if (_descriptionCache.Count > 0)
     {
      _descriptionCache.Clear();
+    }
+
+    if (_bsrByHashCache.Count > 0)
+    {
+     _bsrByHashCache.Clear();
     }
 
     _lastDescriptionCacheCleanupUtc = now;
@@ -811,6 +925,16 @@ public sealed class AttentionPluginRuntime
     _descriptionCache.Remove(expiredKey);
    }
 
+   var expiredBsrKeys = _bsrByHashCache
+    .Where(x => x.Value.ExpiresAtUtc <= now)
+    .Select(x => x.Key)
+    .ToList();
+
+   foreach (var expiredBsrKey in expiredBsrKeys)
+   {
+    _bsrByHashCache.Remove(expiredBsrKey);
+   }
+
    _lastDescriptionCacheCleanupUtc = now;
   }
  }
@@ -829,6 +953,13 @@ public sealed class AttentionPluginRuntime
  private sealed class DescriptionCacheEntry
  {
   public string? Description { get; set; }
+
+  public DateTime ExpiresAtUtc { get; set; }
+ }
+
+ private sealed class BsrByHashCacheEntry
+ {
+  public string? BsrId { get; set; }
 
   public DateTime ExpiresAtUtc { get; set; }
  }

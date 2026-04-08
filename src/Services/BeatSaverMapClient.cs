@@ -19,10 +19,17 @@ public sealed class BeatSaverMapClient : IBeatSaverMapClient
   }
 
   var requestUri = "https://api.beatsaver.com/maps/id/" + Uri.EscapeDataString(bsrId.Trim());
-  return await GetDescriptionFromEndpointAsync(requestUri, cancellationToken).ConfigureAwait(false);
+  var details = await GetMapDetailsFromEndpointAsync(requestUri, cancellationToken).ConfigureAwait(false);
+  return details?.Description;
  }
 
  public async Task<string?> GetDescriptionByHashAsync(string hash, CancellationToken cancellationToken)
+ {
+  var details = await GetMapDetailsByHashAsync(hash, cancellationToken).ConfigureAwait(false);
+  return details?.Description;
+ }
+
+ public async Task<BeatSaverMapDetails?> GetMapDetailsByHashAsync(string hash, CancellationToken cancellationToken)
  {
   if (string.IsNullOrWhiteSpace(hash))
   {
@@ -30,10 +37,10 @@ public sealed class BeatSaverMapClient : IBeatSaverMapClient
   }
 
   var requestUri = "https://api.beatsaver.com/maps/hash/" + Uri.EscapeDataString(hash.Trim());
-  return await GetDescriptionFromEndpointAsync(requestUri, cancellationToken).ConfigureAwait(false);
+  return await GetMapDetailsFromEndpointAsync(requestUri, cancellationToken).ConfigureAwait(false);
  }
 
- private async Task<string?> GetDescriptionFromEndpointAsync(string requestUri, CancellationToken cancellationToken)
+ private async Task<BeatSaverMapDetails?> GetMapDetailsFromEndpointAsync(string requestUri, CancellationToken cancellationToken)
  {
   using var response = await _httpClient.GetAsync(requestUri, cancellationToken).ConfigureAwait(false);
   if (!response.IsSuccessStatusCode)
@@ -43,7 +50,14 @@ public sealed class BeatSaverMapClient : IBeatSaverMapClient
 
   var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
   var parsed = JObject.Parse(json);
+
+  var bsrId = parsed["id"]?.ToString();
   var description = parsed["description"]?.ToString();
-  return string.IsNullOrWhiteSpace(description) ? null : description;
+
+  return new BeatSaverMapDetails
+  {
+   BsrId = string.IsNullOrWhiteSpace(bsrId) ? null : bsrId,
+   Description = string.IsNullOrWhiteSpace(description) ? null : description,
+  };
  }
 }

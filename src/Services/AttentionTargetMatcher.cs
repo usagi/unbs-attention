@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using UnbsAttention.Models;
 
@@ -5,6 +6,9 @@ namespace UnbsAttention.Services;
 
 public static class AttentionTargetMatcher
 {
+ private static readonly RegexOptions CachedRegexOptions = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled;
+ private static readonly ConcurrentDictionary<string, Regex?> RegexCache = new(StringComparer.Ordinal);
+
  public static bool IsMatch(AttentionEntry entry, AttentionLookupContext context)
  {
   if (!string.IsNullOrWhiteSpace(entry.LevelId)
@@ -26,9 +30,11 @@ public static class AttentionTargetMatcher
    return false;
   }
 
+  var infoSearchText = context.BuildInfoSearchText();
+
   return MatchBsr(target.Bsr, context.BsrId)
-      || MatchIncludes(target.InfoIncludes, context.BuildInfoSearchText())
-      || MatchRegex(target.InfoRegex, context.BuildInfoSearchText())
+      || MatchIncludes(target.InfoIncludes, infoSearchText)
+      || MatchRegex(target.InfoRegex, infoSearchText)
       || MatchIncludes(target.DescIncludes, context.BeatSaverDescription)
       || MatchRegex(target.DescRegex, context.BeatSaverDescription);
  }
@@ -109,13 +115,24 @@ public static class AttentionTargetMatcher
    return false;
   }
 
-  try
+  var normalizedPattern = pattern!;
+  var regex = RegexCache.GetOrAdd(normalizedPattern, static candidate =>
   {
-   return Regex.IsMatch(input, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-  }
-  catch (ArgumentException)
+   try
+   {
+    return new Regex(candidate, CachedRegexOptions);
+   }
+   catch (ArgumentException)
+   {
+    return null;
+   }
+  });
+
+  if (regex is null)
   {
    return false;
   }
+
+  return regex.IsMatch(input);
  }
 }

@@ -12,6 +12,9 @@ public class PluginConfig
 {
  public bool Enabled { get; set; } = true;
 
+ // true のときだけ診断ログを出力する。
+ public bool Debug { get; set; } = false;
+
  public AttentionDisplayMode DisplayMode { get; set; } = AttentionDisplayMode.IconWithReason;
 
  // 表示対象カテゴリ（大文字小文字は区別しない）。
@@ -81,7 +84,7 @@ public class PluginConfig
  // 各要素は Google Spreadsheet の完全URL またはシートID。
  public List<string> SpreadsheetSources { get; set; } = new()
  {
-  "https://docs.google.com/spreadsheets/d/1HwMqwaHzlyidgGnIu5wTXosWzxgSI8dW0EO1yrgvAOg/edit?usp=sharing",
+  "https://docs.google.com/spreadsheets/d/14Wxm_M7sZh_kCSaLCuf5TWphaXaBiBqqQGb5g3Zgg3g/edit?usp=sharing",
  };
 
  public bool AutoRefreshOnInit { get; set; } = true;

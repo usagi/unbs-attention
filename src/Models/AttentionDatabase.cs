@@ -5,6 +5,8 @@ namespace UnbsAttention.Models;
 
 public sealed class AttentionDatabase
 {
+ private static readonly ISet<AttentionCategory> EmptyExcludedCategories = new HashSet<AttentionCategory>();
+
  [JsonProperty("version")]
  public int Version { get; set; } = 1;
 
@@ -86,11 +88,16 @@ public sealed class AttentionDatabase
  public IReadOnlyList<AttentionEntry> FindByContext(AttentionLookupContext context, IEnumerable<string>? excludedCategories)
  {
   var excludedSet = BuildExcludedCategorySet(excludedCategories);
+  return FindByContext(context, excludedSet);
+ }
+
+ public IReadOnlyList<AttentionEntry> FindByContext(AttentionLookupContext context, ISet<AttentionCategory>? excludedCategories)
+ {
+  var excludedSet = excludedCategories ?? EmptyExcludedCategories;
   return Entries
-   .Where(e => !excludedSet.Contains(e.Category)
-      && AttentionEntryValidator.IsValidForMatching(e)
-      && AttentionTargetMatcher.IsMatch(e, context))
-   .ToList();
+    .Where(e => !excludedSet.Contains(e.Category)
+        && AttentionTargetMatcher.IsMatch(e, context))
+    .ToList();
  }
 
  public bool TryGetByContext(
@@ -100,9 +107,18 @@ public sealed class AttentionDatabase
  {
   var excludedSet = BuildExcludedCategorySet(excludedCategories);
 
+  return TryGetByContext(context, excludedSet, out entry);
+ }
+
+ public bool TryGetByContext(
+     AttentionLookupContext context,
+     ISet<AttentionCategory>? excludedCategories,
+     out AttentionEntry? entry)
+ {
+  var excludedSet = excludedCategories ?? EmptyExcludedCategories;
+
   entry = Entries.FirstOrDefault(e =>
       !excludedSet.Contains(e.Category)
-      && AttentionEntryValidator.IsValidForMatching(e)
       && AttentionTargetMatcher.IsMatch(e, context));
 
   return entry is not null;
