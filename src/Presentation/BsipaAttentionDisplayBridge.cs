@@ -1456,7 +1456,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   }
 
   object? value = null;
-  var names = new[] { "MidlineLeft", "Left", "TopLeft", "BottomLeft" };
+  var names = new[] { "TopLeft", "UpperLeft", "Left", "MidlineLeft", "BottomLeft" };
   foreach (var name in names)
   {
    if (Enum.GetNames(enumType).Any(x => string.Equals(x, name, StringComparison.Ordinal)))
