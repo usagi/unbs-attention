@@ -1,4 +1,4 @@
-# USAGI.NETWORK BeatSaber Attention
+# UNBS-Attention; USAGI.NETWORK BeatSaber Attention
 
 Beat Saber 向けの〝⚠️アテンション情報〟を表示するプラグインです。
 
