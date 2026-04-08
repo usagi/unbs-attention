@@ -20,6 +20,7 @@ public sealed class AttentionPluginRuntime
  private readonly Dictionary<string, DescriptionCacheEntry> _descriptionCache = new(StringComparer.OrdinalIgnoreCase);
  private readonly object _descriptionCacheGate = new();
  private DateTime _lastDescriptionCacheCleanupUtc = DateTime.MinValue;
+ private long _dataRevision;
 
  public void Init(PluginConfig config)
  {
@@ -82,8 +83,14 @@ public sealed class AttentionPluginRuntime
   var previousSignature = CreateSignature(_effectiveDatabase);
   var next = BuildEffectiveDatabase(remote);
   _effectiveDatabase = next;
+  Interlocked.Increment(ref _dataRevision);
   var nextSignature = CreateSignature(_effectiveDatabase);
   return string.Equals(previousSignature, nextSignature, StringComparison.Ordinal) ? 0 : 1;
+ }
+
+ public long GetDataRevision()
+ {
+  return Interlocked.Read(ref _dataRevision);
  }
 
  public async Task<string?> BuildAttentionTextAsync(SongSelectionSnapshot snapshot, CancellationToken cancellationToken)
@@ -255,6 +262,9 @@ public sealed class AttentionPluginRuntime
    AttentionDisplayColorHex = _config.AttentionDisplayColorHex,
    PlayButtonAttentionColorHex = _config.PlayButtonAttentionColorHex,
    PlayButtonAttentionTextColorHex = _config.PlayButtonAttentionTextColorHex,
+   PlayButtonConfirmColorHex = _config.PlayButtonConfirmColorHex,
+   PlayButtonConfirmText = _config.PlayButtonConfirmText,
+   PlayButtonConfirmDurationSeconds = _config.PlayButtonConfirmDurationSeconds,
    DiscordChannelUrl = _config.DiscordChannelUrl,
   };
  }
@@ -341,6 +351,93 @@ public sealed class AttentionPluginRuntime
   return _config.PlayButtonAttentionTextColorHex;
  }
 
+ public bool SetAttentionDisplayColorHex(string? value)
+ {
+  var next = NormalizeColorHex(value, "#FFFF00FF");
+  if (string.Equals(_config.AttentionDisplayColorHex, next, StringComparison.Ordinal))
+  {
+   return false;
+  }
+
+  _config.AttentionDisplayColorHex = next;
+  return true;
+ }
+
+ public bool SetPlayButtonAttentionColorHex(string? value)
+ {
+  var next = NormalizeColorHex(value, "#FFFF00FF");
+  if (string.Equals(_config.PlayButtonAttentionColorHex, next, StringComparison.Ordinal))
+  {
+   return false;
+  }
+
+  _config.PlayButtonAttentionColorHex = next;
+  return true;
+ }
+
+ public bool SetPlayButtonAttentionTextColorHex(string? value)
+ {
+  var next = NormalizeColorHex(value, "#880000FF");
+  if (string.Equals(_config.PlayButtonAttentionTextColorHex, next, StringComparison.Ordinal))
+  {
+   return false;
+  }
+
+  _config.PlayButtonAttentionTextColorHex = next;
+  return true;
+ }
+
+ public string GetPlayButtonConfirmColorHex()
+ {
+  return _config.PlayButtonConfirmColorHex;
+ }
+
+ public string GetPlayButtonConfirmText()
+ {
+  return _config.PlayButtonConfirmText;
+ }
+
+ public int GetPlayButtonConfirmDurationSeconds()
+ {
+  return Math.Max(0, _config.PlayButtonConfirmDurationSeconds);
+ }
+
+ public bool SetPlayButtonConfirmColorHex(string? value)
+ {
+  var next = NormalizeColorHex(value, "#FF5933FF");
+  if (string.Equals(_config.PlayButtonConfirmColorHex, next, StringComparison.Ordinal))
+  {
+   return false;
+  }
+
+  _config.PlayButtonConfirmColorHex = next;
+  return true;
+ }
+
+ public bool SetPlayButtonConfirmText(string? value)
+ {
+  var next = NormalizePlayConfirmText(value);
+  if (string.Equals(_config.PlayButtonConfirmText, next, StringComparison.Ordinal))
+  {
+   return false;
+  }
+
+  _config.PlayButtonConfirmText = next;
+  return true;
+ }
+
+ public bool SetPlayButtonConfirmDurationSeconds(int value)
+ {
+  var next = Math.Max(0, value);
+  if (_config.PlayButtonConfirmDurationSeconds == next)
+  {
+   return false;
+  }
+
+  _config.PlayButtonConfirmDurationSeconds = next;
+  return true;
+ }
+
  public bool AdjustAttentionPositionOffset(int deltaX, int deltaY)
  {
   var nextX = Math.Max(-400, Math.Min(400, _config.AttentionPositionOffsetX + deltaX));
@@ -397,6 +494,9 @@ public sealed class AttentionPluginRuntime
   _config.AttentionDisplayColorHex = NormalizeColorHex(_config.AttentionDisplayColorHex, "#FFFF00FF");
   _config.PlayButtonAttentionColorHex = NormalizeColorHex(_config.PlayButtonAttentionColorHex, "#FFFF00FF");
   _config.PlayButtonAttentionTextColorHex = NormalizeColorHex(_config.PlayButtonAttentionTextColorHex, "#880000FF");
+  _config.PlayButtonConfirmColorHex = NormalizeColorHex(_config.PlayButtonConfirmColorHex, "#FF5933FF");
+  _config.PlayButtonConfirmText = NormalizePlayConfirmText(_config.PlayButtonConfirmText);
+  _config.PlayButtonConfirmDurationSeconds = Math.Max(0, _config.PlayButtonConfirmDurationSeconds);
 
   NormalizeAttentionCategories();
   NormalizeCategoryPrefixes();
@@ -490,6 +590,12 @@ public sealed class AttentionPluginRuntime
  {
   var trimmed = value?.Trim();
   return string.IsNullOrWhiteSpace(trimmed) ? fallback : trimmed!;
+ }
+
+ private static string NormalizePlayConfirmText(string? value)
+ {
+  var trimmed = value?.Trim();
+  return string.IsNullOrWhiteSpace(trimmed) ? "本当に？" : trimmed!;
  }
 
  private IReadOnlyList<string> BuildExcludedCategoriesForMatching()

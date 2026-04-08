@@ -69,7 +69,7 @@ public sealed class UnbsSettingsViewController : BSMLResourceViewController, IPl
   ReloadSourceList();
 
   var report = state.LastRefreshReport;
-  ReportText = $"更新結果: success={report.SucceededSources} fail={report.FailedSources} rows={report.ImportedRows}";
+  ReportText = $"Succeeded={report.SucceededSources} Failed={report.FailedSources} Attentions={report.ImportedRows}";
   RefreshFailDetails = BuildFailDetailsText(report);
 
   NotifyPropertyChanged(nameof(ReportText));

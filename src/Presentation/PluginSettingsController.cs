@@ -52,6 +52,39 @@ public sealed class PluginSettingsController
   return changed;
  }
 
+ public bool SetAttentionDisplayColorHex(string value)
+ {
+  var changed = _runtime.SetAttentionDisplayColorHex(value);
+  if (changed)
+  {
+   RenderAll();
+  }
+
+  return changed;
+ }
+
+ public bool SetPlayButtonAttentionColorHex(string value)
+ {
+  var changed = _runtime.SetPlayButtonAttentionColorHex(value);
+  if (changed)
+  {
+   RenderAll();
+  }
+
+  return changed;
+ }
+
+ public bool SetPlayButtonAttentionTextColorHex(string value)
+ {
+  var changed = _runtime.SetPlayButtonAttentionTextColorHex(value);
+  if (changed)
+  {
+   RenderAll();
+  }
+
+  return changed;
+ }
+
  public bool SetCategoryPrefix(AttentionCategory category, string prefix)
  {
   var changed = _runtime.SetCategoryPrefix(category, prefix);
@@ -66,6 +99,39 @@ public sealed class PluginSettingsController
  public bool AdjustAttentionPositionOffset(int deltaX, int deltaY)
  {
   var changed = _runtime.AdjustAttentionPositionOffset(deltaX, deltaY);
+  if (changed)
+  {
+   RenderAll();
+  }
+
+  return changed;
+ }
+
+ public bool SetPlayButtonConfirmColorHex(string value)
+ {
+  var changed = _runtime.SetPlayButtonConfirmColorHex(value);
+  if (changed)
+  {
+   RenderAll();
+  }
+
+  return changed;
+ }
+
+ public bool SetPlayButtonConfirmText(string value)
+ {
+  var changed = _runtime.SetPlayButtonConfirmText(value);
+  if (changed)
+  {
+   RenderAll();
+  }
+
+  return changed;
+ }
+
+ public bool SetPlayButtonConfirmDurationSeconds(int value)
+ {
+  var changed = _runtime.SetPlayButtonConfirmDurationSeconds(value);
   if (changed)
   {
    RenderAll();
@@ -170,12 +236,18 @@ public sealed class PluginSettingsController
   return new PluginSettingsState
   {
    Enabled = _runtime.GetEnabled(),
+   AttentionDisplayColorHex = _runtime.GetAttentionDisplayColorHex(),
+   PlayButtonAttentionColorHex = _runtime.GetPlayButtonAttentionColorHex(),
+   PlayButtonAttentionTextColorHex = _runtime.GetPlayButtonAttentionTextColorHex(),
    AttentionCategories = map,
    CategoryPrefixes = prefixMap,
    Sources = _runtime.GetSpreadsheetSourceItems(),
    LastRefreshReport = _runtime.GetLastRefreshReport(),
    AttentionPositionOffsetX = _runtime.GetAttentionPositionOffsetX(),
    AttentionPositionOffsetY = _runtime.GetAttentionPositionOffsetY(),
+   PlayButtonConfirmColorHex = _runtime.GetPlayButtonConfirmColorHex(),
+   PlayButtonConfirmText = _runtime.GetPlayButtonConfirmText(),
+   PlayButtonConfirmDurationSeconds = _runtime.GetPlayButtonConfirmDurationSeconds(),
   };
  }
 }

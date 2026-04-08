@@ -14,5 +14,7 @@
     <text text='~RefreshFailDetails' font-size='2.5' word-wrapping='true' />
 
     <text text='使い方: URL追加 -> 更新 -> 表示カテゴリをON' font-size='3.1' />
+    <button text='今すぐ更新' on-click='RefreshNow' />
+    <text text='~ReportText' font-size='3.0' font-align='Center' />
   </vertical>
 </bg>

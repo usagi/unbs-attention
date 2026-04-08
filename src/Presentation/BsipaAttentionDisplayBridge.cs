@@ -11,6 +11,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private static readonly Color DefaultAttentionDisplayColor = new(1f, 0.84f, 0.25f, 1f);
  private static readonly Color DefaultPlayButtonAttentionColor = new(1f, 0.86f, 0.18f, 1f);
  private static readonly Color DefaultPlayButtonAttentionTextColor = new(0f, 0f, 0f, 1f);
+ private static readonly Color DefaultPlayButtonConfirmColor = new(1f, 0.35f, 0.2f, 1f);
  private static readonly Color DefaultPlayButtonOutlineColor = new(0f, 0f, 0f, 1f);
 
  private AttentionPluginRuntime? _runtime;
@@ -35,11 +36,22 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private ColorMemberSnapshot? _playTintOriginalSnapshot;
  private ColorMemberSnapshot? _playOutlineOriginalSnapshot;
  private ColorMemberSnapshot? _playLabelOriginalSnapshot;
+ private string? _playLabelOriginalText;
+ private bool _playLabelOriginalTextCaptured;
  private bool _playOriginalSelectableColorsCaptured;
  private object? _playOriginalSelectableColors;
+ private Component? _playClickInterceptTarget;
+ private object? _playOriginalOnClickEvent;
+ private object? _playInterceptOnClickEvent;
+ private bool _playInterceptInstalled;
+ private bool _playConfirmModalVisible;
+ private bool _playBypassOnce;
+ private bool _playInterceptDisabledDueToError;
+ private float _playConfirmArmedUntil;
  private string _lastPlayAnchorPath = string.Empty;
  private float _lastTintTraceAt;
  private int _tintTraceCount;
+ private long _lastDataRevision = -1;
 
  public void Bind(AttentionPluginRuntime runtime)
  {
@@ -69,6 +81,12 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   }
 
   _lastRefreshAt = now;
+
+    if (_playConfirmModalVisible && now > _playConfirmArmedUntil)
+    {
+     _playConfirmModalVisible = false;
+    }
+
   _ = RefreshAsync(_cts.Token);
  }
 
@@ -115,6 +133,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     _currentPlayAnchor = null;
     _currentPracticeAnchor = null;
     _currentActionAnchor = null;
+    ResetPlayIntercept();
      UpdatePlayButtonTint(false);
    return;
   }
@@ -151,6 +170,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     _currentPlayAnchor = null;
     _currentPracticeAnchor = null;
     _currentActionAnchor = null;
+      ResetPlayIntercept();
       UpdatePlayButtonTint(false);
     return;
   }
@@ -211,7 +231,298 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     PositionCurvedTextUnderPlayArea();
   }
 
+  if (!_playInterceptDisabledDueToError)
+  {
+   try
+   {
+    EnsurePlayClickIntercept(hasText);
+   }
+   catch (Exception ex)
+   {
+    _playInterceptDisabledDueToError = true;
+    _playConfirmModalVisible = false;
+    RestorePlayClickIntercept();
+    Debug.LogError("[UNBS] Play intercept disabled due to runtime error: " + ex.GetType().Name + " " + ex.Message);
+   }
+  }
+
   UpdatePlayButtonTint(hasText);
+ }
+
+ private void EnsurePlayClickIntercept(bool attentionActive)
+ {
+  var target = ResolvePlayClickTarget();
+  if (!ReferenceEquals(target, _playClickInterceptTarget))
+  {
+   RestorePlayClickIntercept();
+  }
+
+  if (target is null)
+  {
+   return;
+  }
+
+  if (_playInterceptInstalled)
+  {
+   if (!attentionActive)
+   {
+    _playConfirmModalVisible = false;
+   }
+
+   return;
+  }
+
+  if (!TryInstallPlayClickIntercept(target))
+  {
+   return;
+  }
+
+  _playClickInterceptTarget = target;
+  _playInterceptInstalled = true;
+ }
+
+ private Component? ResolvePlayClickTarget()
+ {
+  if (_playSelectableTarget is not null && HasOnClickEvent(_playSelectableTarget))
+  {
+   return _playSelectableTarget;
+  }
+
+  if (_currentPlayAnchor is null)
+  {
+   return null;
+  }
+
+  foreach (var component in _currentPlayAnchor.GetComponentsInChildren<Component>(true))
+  {
+   if (component is not null && HasOnClickEvent(component))
+   {
+    return component;
+   }
+  }
+
+  return null;
+ }
+
+ private bool TryInstallPlayClickIntercept(Component target)
+ {
+  if (!TryGetOnClickEvent(target, out var originalEvent) || originalEvent is null)
+  {
+   return false;
+  }
+
+  object? interceptEvent;
+  try
+  {
+   interceptEvent = Activator.CreateInstance(originalEvent.GetType());
+  }
+  catch
+  {
+   return false;
+  }
+
+  if (interceptEvent is null)
+  {
+   return false;
+  }
+
+  var addListener = interceptEvent.GetType()
+   .GetMethods(InstanceFlags)
+   .FirstOrDefault(x =>
+    string.Equals(x.Name, "AddListener", StringComparison.Ordinal)
+    && x.GetParameters().Length == 1
+    && typeof(Delegate).IsAssignableFrom(x.GetParameters()[0].ParameterType));
+  var listenerType = addListener?.GetParameters().FirstOrDefault()?.ParameterType;
+  var handler = GetType().GetMethod(nameof(OnInterceptedPlayClicked), InstanceFlags);
+  if (addListener is null || listenerType is null || handler is null)
+  {
+   return false;
+  }
+
+  var del = Delegate.CreateDelegate(listenerType, this, handler, false);
+  if (del is null)
+  {
+   return false;
+  }
+
+  addListener.Invoke(interceptEvent, new object[] { del });
+  if (!TrySetOnClickEvent(target, interceptEvent))
+  {
+   return false;
+  }
+
+  _playOriginalOnClickEvent = originalEvent;
+  _playInterceptOnClickEvent = interceptEvent;
+  Debug.Log("[UNBS] Play click intercept installed on " + DescribeComponent(target));
+  return true;
+ }
+
+ private void OnInterceptedPlayClicked()
+ {
+  if (_playBypassOnce)
+  {
+   InvokeOriginalPlay();
+   return;
+  }
+
+  var attentionActive = !string.IsNullOrWhiteSpace(_displayText);
+  if (!attentionActive)
+  {
+   InvokeOriginalPlay();
+   return;
+  }
+
+  if (_playConfirmModalVisible && Time.unscaledTime <= _playConfirmArmedUntil)
+  {
+    _playBypassOnce = true;
+    var started = InvokeOriginalPlayWithTemporaryRestore();
+    _playBypassOnce = false;
+    _playConfirmModalVisible = !started;
+    if (started)
+    {
+     Debug.Log("[UNBS] Play confirmation accepted via second press.");
+    }
+    else
+    {
+     Debug.LogWarning("[UNBS] Play confirmation second press did not start song. Keeping confirm state.");
+    }
+   return;
+  }
+
+  _playConfirmModalVisible = true;
+    var durationSeconds = GetPlayButtonConfirmDurationSeconds();
+    _playConfirmArmedUntil = Time.unscaledTime + durationSeconds;
+      Debug.Log("[UNBS] Play confirmation armed. Press Play again within " + durationSeconds + " seconds to start.");
+ }
+
+ private bool InvokeOriginalPlayWithTemporaryRestore()
+ {
+  if (_playClickInterceptTarget is null || _playOriginalOnClickEvent is null)
+  {
+   InvokeOriginalPlay();
+   return true;
+  }
+
+  var restored = TrySetOnClickEvent(_playClickInterceptTarget, _playOriginalOnClickEvent);
+  if (!restored)
+  {
+   InvokeOriginalPlay();
+   return true;
+  }
+
+  var invoked = TryInvokeOnClickFromComponent(_playClickInterceptTarget)
+   || TryInvokeEventObject(_playOriginalOnClickEvent);
+
+  if (_playInterceptOnClickEvent is not null)
+  {
+   TrySetOnClickEvent(_playClickInterceptTarget, _playInterceptOnClickEvent);
+  }
+
+  return invoked;
+ }
+
+ private void InvokeOriginalPlay()
+ {
+  if (_playOriginalOnClickEvent is null)
+  {
+   return;
+  }
+
+  TryInvokeEventObject(_playOriginalOnClickEvent);
+ }
+
+ private static bool TryInvokeOnClickFromComponent(Component component)
+ {
+  if (!TryGetOnClickEvent(component, out var evt) || evt is null)
+  {
+   return false;
+  }
+
+  return TryInvokeEventObject(evt);
+ }
+
+ private static bool TryInvokeEventObject(object evt)
+ {
+  var invoke = evt.GetType()
+   .GetMethods(InstanceFlags)
+   .FirstOrDefault(x => string.Equals(x.Name, "Invoke", StringComparison.Ordinal) && x.GetParameters().Length == 0);
+  if (invoke is null)
+  {
+   return false;
+  }
+
+  invoke.Invoke(evt, null);
+  return true;
+ }
+
+ private void RestorePlayClickIntercept()
+ {
+  if (_playClickInterceptTarget is not null && _playOriginalOnClickEvent is not null)
+  {
+   TrySetOnClickEvent(_playClickInterceptTarget, _playOriginalOnClickEvent);
+  }
+
+  _playClickInterceptTarget = null;
+  _playOriginalOnClickEvent = null;
+  _playInterceptOnClickEvent = null;
+  _playInterceptInstalled = false;
+  _playBypassOnce = false;
+    _playConfirmArmedUntil = 0f;
+ }
+
+ private void ResetPlayIntercept()
+ {
+  _playConfirmModalVisible = false;
+  _playInterceptDisabledDueToError = false;
+  RestorePlayClickIntercept();
+ }
+
+ private static bool HasOnClickEvent(Component component)
+ {
+  return TryGetOnClickEvent(component, out _);
+ }
+
+ private static bool TryGetOnClickEvent(Component component, out object? evt)
+ {
+  evt = null;
+  var prop = component.GetType().GetProperty("onClick", InstanceFlags);
+  if (prop?.CanRead != true)
+  {
+   return false;
+  }
+
+  evt = prop.GetValue(component);
+  return evt is not null;
+ }
+
+ private static bool TrySetOnClickEvent(Component component, object evt)
+ {
+  var type = component.GetType();
+
+  var prop = type.GetProperty("onClick", InstanceFlags);
+  if (prop?.CanWrite == true && prop.PropertyType.IsAssignableFrom(evt.GetType()))
+  {
+   prop.SetValue(component, evt);
+   return true;
+  }
+
+  FieldInfo? field = null;
+  var cursor = type;
+  while (cursor is not null && field is null)
+  {
+   field = cursor.GetField("m_OnClick", InstanceFlags)
+    ?? cursor.GetField("_onClick", InstanceFlags)
+    ?? cursor.GetField("onClick", InstanceFlags);
+   cursor = cursor.BaseType;
+  }
+
+  if (field is null || !field.FieldType.IsAssignableFrom(evt.GetType()))
+  {
+   return false;
+  }
+
+  field.SetValue(component, evt);
+  return true;
  }
 
  private void CreateCurvedTextFromTemplate(Component template, Transform parent)
@@ -323,7 +634,9 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
 
  private void UpdatePlayButtonTint(bool attentionActive)
  {
-  var activeTint = GetPlayButtonAttentionColor();
+  var activeTint = _playConfirmModalVisible
+     ? GetPlayButtonConfirmColor()
+   : GetPlayButtonAttentionColor();
   var activeOutlineTint = DefaultPlayButtonOutlineColor;
   var activeLabelTint = GetPlayButtonAttentionTextColor();
   var colorWriteOk = false;
@@ -362,6 +675,8 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   {
    selectableWriteOk = TrySetSelectableTint(_playSelectableTarget, attentionActive, activeTint);
   }
+
+    UpdatePlayButtonConfirmLabel(attentionActive && _playConfirmModalVisible);
 
   var now = Time.unscaledTime;
   if (now - _lastTintTraceAt >= 0.5f)
@@ -568,11 +883,15 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    {
     _displayText = null;
     _lastLevelId = string.Empty;
+     _lastDataRevision = -1;
     return;
    }
 
+    var dataRevision = _runtime!.GetDataRevision();
+
    if (string.Equals(_lastLevelId, snapshot.LevelId, StringComparison.OrdinalIgnoreCase)
-       && !string.IsNullOrWhiteSpace(_displayText))
+      && !string.IsNullOrWhiteSpace(_displayText)
+      && _lastDataRevision == dataRevision)
    {
     return;
    }
@@ -583,6 +902,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
 
    _displayText = text;
    _lastLevelId = snapshot.LevelId ?? string.Empty;
+  _lastDataRevision = dataRevision;
   }
   catch
   {
@@ -870,6 +1190,41 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   return null;
  }
 
+   private void UpdatePlayButtonConfirmLabel(bool confirmActive)
+   {
+    if (_playLabelTintTarget is null)
+    {
+    return;
+    }
+
+    if (!_playLabelOriginalTextCaptured)
+    {
+    if (TryGetTextFromComponent(_playLabelTintTarget, out var original))
+    {
+     _playLabelOriginalText = original;
+     _playLabelOriginalTextCaptured = true;
+    }
+    }
+
+    if (!_playLabelOriginalTextCaptured)
+    {
+    return;
+    }
+
+    if (confirmActive)
+    {
+       var remainingSeconds = Mathf.Max(0, Mathf.CeilToInt(_playConfirmArmedUntil - Time.unscaledTime));
+       var confirmLabel = GetPlayButtonConfirmText() + "(" + remainingSeconds + ")";
+       SetTextOnComponent(_playLabelTintTarget, confirmLabel);
+    return;
+    }
+
+    if (_playLabelOriginalText is not null)
+    {
+    SetTextOnComponent(_playLabelTintTarget, _playLabelOriginalText);
+    }
+   }
+
  private static void ExpandBoundsWithAnchor(Transform? anchor, Transform? expectedParent, ref float left, ref float right, ref float bottom)
  {
   if (anchor is not RectTransform rect || expectedParent is null)
@@ -989,19 +1344,21 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  {
   var type = beatmapLevel.GetType();
 
-  string? GetString(string fieldName)
+  string? GetString(params string[] names)
   {
-   var field = type.GetField(fieldName, InstanceFlags);
-   if (field?.GetValue(beatmapLevel) is string s)
+   foreach (var name in names)
    {
-    return s;
+    var value = TryReadStringMember(type, beatmapLevel, name);
+    if (!string.IsNullOrWhiteSpace(value))
+    {
+     return value;
+    }
    }
 
-   var property = type.GetProperty(fieldName, InstanceFlags);
-   return property?.GetValue(beatmapLevel) as string;
+   return null;
   }
 
-  var levelId = GetString("levelID");
+  var levelId = GetString("levelID", "levelId", "_levelID", "_levelId");
   if (string.IsNullOrWhiteSpace(levelId))
   {
    return null;
@@ -1010,13 +1367,39 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   return new SongSelectionSnapshot
   {
    LevelId = levelId,
-   SongName = GetString("songName"),
-   SongSubName = GetString("songSubName"),
-   SongAuthorName = GetString("songAuthorName"),
-   LevelAuthorName = null,
+   SongName = GetString("songName", "_songName", "songDisplayName"),
+   SongSubName = GetString("songSubName", "_songSubName"),
+   SongAuthorName = GetString("songAuthorName", "_songAuthorName"),
+   LevelAuthorName = GetString("levelAuthorName", "_levelAuthorName", "allMappers"),
    BsrId = null,
    BeatSaverDescription = null,
   };
+ }
+
+ private static string? TryReadStringMember(Type type, object instance, string memberName)
+ {
+  for (var cursor = type; cursor is not null; cursor = cursor.BaseType)
+  {
+   var field = cursor.GetField(memberName, InstanceFlags)
+    ?? cursor.GetFields(InstanceFlags).FirstOrDefault(x => string.Equals(x.Name, memberName, StringComparison.OrdinalIgnoreCase));
+   if (field?.FieldType == typeof(string) && field.GetValue(instance) is string fieldValue && !string.IsNullOrWhiteSpace(fieldValue))
+   {
+    return fieldValue;
+   }
+
+   var property = cursor.GetProperty(memberName, InstanceFlags)
+    ?? cursor.GetProperties(InstanceFlags).FirstOrDefault(x => string.Equals(x.Name, memberName, StringComparison.OrdinalIgnoreCase));
+   if (property?.CanRead == true
+    && property.PropertyType == typeof(string)
+    && property.GetIndexParameters().Length == 0
+    && property.GetValue(instance) is string propertyValue
+    && !string.IsNullOrWhiteSpace(propertyValue))
+   {
+    return propertyValue;
+   }
+  }
+
+  return null;
  }
 
  private static void SetTextOnComponent(Component textComponent, string text)
@@ -1034,6 +1417,27 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   {
    field.SetValue(textComponent, text);
   }
+ }
+
+ private static bool TryGetTextFromComponent(Component textComponent, out string text)
+ {
+  text = string.Empty;
+  var type = textComponent.GetType();
+  var prop = type.GetProperty("text", InstanceFlags);
+  if (prop?.CanRead == true && prop.PropertyType == typeof(string) && prop.GetValue(textComponent) is string propText)
+  {
+   text = propText;
+   return true;
+  }
+
+  var field = type.GetField("text", InstanceFlags);
+  if (field?.FieldType == typeof(string) && field.GetValue(textComponent) is string fieldText)
+  {
+   text = fieldText;
+   return true;
+  }
+
+  return false;
  }
 
  private static void TrySetLeftAlignment(Component textComponent)
@@ -1329,6 +1733,22 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   return ParseRuntimeColor(_runtime?.GetPlayButtonAttentionTextColorHex(), DefaultPlayButtonAttentionTextColor);
  }
 
+ private Color GetPlayButtonConfirmColor()
+ {
+  return ParseRuntimeColor(_runtime?.GetPlayButtonConfirmColorHex(), DefaultPlayButtonConfirmColor);
+ }
+
+ private string GetPlayButtonConfirmText()
+ {
+  var value = _runtime?.GetPlayButtonConfirmText()?.Trim();
+  return string.IsNullOrWhiteSpace(value) ? "本当？" : value!;
+ }
+
+ private int GetPlayButtonConfirmDurationSeconds()
+ {
+  return Math.Max(0, _runtime?.GetPlayButtonConfirmDurationSeconds() ?? 6);
+ }
+
  private static Color ParseRuntimeColor(string? rawHex, Color fallback)
  {
   var trimmed = rawHex?.Trim();
@@ -1357,6 +1777,11 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
      RestoreColorMemberSnapshot(_playLabelTintTarget, _playLabelOriginalSnapshot);
     }
 
+  if (_playLabelTintTarget is not null && _playLabelOriginalTextCaptured && _playLabelOriginalText is not null)
+  {
+   SetTextOnComponent(_playLabelTintTarget, _playLabelOriginalText);
+  }
+
   if (_playSelectableTarget is not null
    && _playOriginalSelectableColorsCaptured
    && _playOriginalSelectableColors is not null)
@@ -1367,6 +1792,8 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   _playTintOriginalSnapshot = null;
   _playOutlineOriginalSnapshot = null;
   _playLabelOriginalSnapshot = null;
+    _playLabelOriginalText = null;
+    _playLabelOriginalTextCaptured = false;
   _playOriginalSelectableColorsCaptured = false;
   _playOriginalSelectableColors = null;
  }
@@ -1398,6 +1825,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     }
 
   RestorePlayButtonVisualState();
+    ResetPlayIntercept();
   _playTintTarget = null;
   _playOutlineTintTarget = null;
   _playLabelTintTarget = null;

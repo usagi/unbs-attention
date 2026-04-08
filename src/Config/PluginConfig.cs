@@ -53,6 +53,15 @@ public class PluginConfig
  // アテンション時のPlayボタン文字色（#RRGGBB / #RRGGBBAA）。
  public string PlayButtonAttentionTextColorHex { get; set; } = "#880000FF";
 
+ // アテンション確認中(2回目待ち)のPlayボタン背景色（#RRGGBB / #RRGGBBAA）。
+ public string PlayButtonConfirmColorHex { get; set; } = "#FF5933FF";
+
+ // アテンション確認中にPlayラベルを置き換える文言。
+ public string PlayButtonConfirmText { get; set; } = "本当？";
+
+ // アテンション確認の有効時間（秒）。0以上の整数。
+ public int PlayButtonConfirmDurationSeconds { get; set; } = 6;
+
  public bool EnableOnlyWhenTwitchStreamerLive { get; set; } = false;
 
  public string TwitchBroadcasterId { get; set; } = string.Empty;

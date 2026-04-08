@@ -29,13 +29,20 @@ public sealed class UnbsSettingsLeftViewController : BSMLResourceViewController,
   nameof(PrefixOther),
   nameof(PositionOffsetX),
   nameof(PositionOffsetY),
+    nameof(AttentionDisplayColorHex),
+    nameof(PlayButtonAttentionColorHex),
+    nameof(PlayButtonAttentionTextColorHex),
+  nameof(PlayConfirmColorHex),
+  nameof(PlayConfirmText),
+  nameof(PlayConfirmDurationSecondsText),
  };
 
  private enum LeftTab
  {
   General = 0,
-  Prefix = 1,
-  Position = 2,
+  Attention = 1,
+  Prefix = 2,
+  Position = 3,
  }
 
  private PluginSettingsController? _controller;
@@ -54,6 +61,9 @@ public sealed class UnbsSettingsLeftViewController : BSMLResourceViewController,
  [UIValue("GeneralTabActive")]
  public bool GeneralTabActive => _activeTab == LeftTab.General;
 
+ [UIValue("AttentionTabActive")]
+ public bool AttentionTabActive => _activeTab == LeftTab.Attention;
+
  [UIValue("PrefixTabActive")]
  public bool PrefixTabActive => _activeTab == LeftTab.Prefix;
 
@@ -65,6 +75,48 @@ public sealed class UnbsSettingsLeftViewController : BSMLResourceViewController,
 
  [UIValue("PositionOffsetY")]
  public string PositionOffsetY => _state.AttentionPositionOffsetY.ToString();
+
+ [UIValue("AttentionDisplayColorHex")]
+ public string AttentionDisplayColorHex
+ {
+  get => _state.AttentionDisplayColorHex;
+  set => SetAttentionDisplayColorHex(value);
+ }
+
+ [UIValue("PlayButtonAttentionColorHex")]
+ public string PlayButtonAttentionColorHex
+ {
+  get => _state.PlayButtonAttentionColorHex;
+  set => SetPlayButtonAttentionColorHex(value);
+ }
+
+ [UIValue("PlayButtonAttentionTextColorHex")]
+ public string PlayButtonAttentionTextColorHex
+ {
+  get => _state.PlayButtonAttentionTextColorHex;
+  set => SetPlayButtonAttentionTextColorHex(value);
+ }
+
+ [UIValue("PlayConfirmColorHex")]
+ public string PlayConfirmColorHex
+ {
+  get => _state.PlayButtonConfirmColorHex;
+  set => SetPlayConfirmColorHex(value);
+ }
+
+ [UIValue("PlayConfirmText")]
+ public string PlayConfirmText
+ {
+  get => _state.PlayButtonConfirmText;
+  set => SetPlayConfirmText(value);
+ }
+
+ [UIValue("PlayConfirmDurationSecondsText")]
+ public string PlayConfirmDurationSecondsText
+ {
+  get => _state.PlayButtonConfirmDurationSeconds.ToString();
+  set => SetPlayConfirmDurationSecondsText(value);
+ }
 
  [UIValue("Enabled")]
  public bool Enabled
@@ -225,6 +277,12 @@ public sealed class UnbsSettingsLeftViewController : BSMLResourceViewController,
   SetActiveTab(LeftTab.General);
  }
 
+ [UIAction("ShowAttentionTab")]
+ public void ShowAttentionTab()
+ {
+  SetActiveTab(LeftTab.Attention);
+ }
+
  [UIAction("ShowPrefixTab")]
  public void ShowPrefixTab()
  {
@@ -341,6 +399,75 @@ public sealed class UnbsSettingsLeftViewController : BSMLResourceViewController,
   }
  }
 
+ private void SetPlayConfirmColorHex(string value)
+ {
+  if (_suppressCallbacks || _controller is null)
+  {
+   return;
+  }
+
+  _controller.SetPlayButtonConfirmColorHex(value);
+ }
+
+   private void SetAttentionDisplayColorHex(string value)
+   {
+    if (_suppressCallbacks || _controller is null)
+    {
+     return;
+    }
+
+    _controller.SetAttentionDisplayColorHex(value);
+   }
+
+   private void SetPlayButtonAttentionColorHex(string value)
+   {
+    if (_suppressCallbacks || _controller is null)
+    {
+     return;
+    }
+
+    _controller.SetPlayButtonAttentionColorHex(value);
+   }
+
+   private void SetPlayButtonAttentionTextColorHex(string value)
+   {
+    if (_suppressCallbacks || _controller is null)
+    {
+     return;
+    }
+
+    _controller.SetPlayButtonAttentionTextColorHex(value);
+   }
+
+ private void SetPlayConfirmText(string value)
+ {
+  if (_suppressCallbacks || _controller is null)
+  {
+   return;
+  }
+
+  _controller.SetPlayButtonConfirmText(value);
+ }
+
+ private void SetPlayConfirmDurationSecondsText(string value)
+ {
+  if (_suppressCallbacks || _controller is null)
+  {
+   return;
+  }
+
+  var trimmed = value?.Trim();
+  if (!int.TryParse(trimmed, out var seconds) || seconds < 0)
+  {
+   LastMessage = "Confirm countdown seconds must be an integer >= 0.";
+   NotifyPropertyChanged(nameof(LastMessage));
+   _controller.RenderState();
+   return;
+  }
+
+  _controller.SetPlayButtonConfirmDurationSeconds(seconds);
+ }
+
  private void SetActiveTab(LeftTab tab)
  {
   if (_activeTab == tab)
@@ -355,6 +482,7 @@ public sealed class UnbsSettingsLeftViewController : BSMLResourceViewController,
  private void NotifyTabStateChanged()
  {
   NotifyPropertyChanged(nameof(GeneralTabActive));
+  NotifyPropertyChanged(nameof(AttentionTabActive));
   NotifyPropertyChanged(nameof(PrefixTabActive));
   NotifyPropertyChanged(nameof(PositionTabActive));
  }

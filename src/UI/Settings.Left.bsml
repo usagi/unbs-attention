@@ -1,65 +1,73 @@
 <bg xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xsi:schemaLocation='https://monkeymanboy.github.io/BSML-Docs/ https://raw.githubusercontent.com/monkeymanboy/BSML-Docs/gh-pages/BSMLSchema.xsd'>
-  <vertical spacing='1'>
-    <horizontal spacing='1'>
+  <vertical spacing='1' pref-height='80'>
+    <horizontal spacing='1' pref-height='8'>
       <button text='General' on-click='ShowGeneralTab' />
+      <button text='Attention' on-click='ShowAttentionTab' />
       <button text='Prefix' on-click='ShowPrefixTab' />
       <button text='Position' on-click='ShowPositionTab' />
     </horizontal>
 
-    <toggle-setting text='Enabled' value='Enabled' active='~GeneralTabActive' />
+    <vertical spacing='1' pref-height='71' pad='1' bg='round-rect-panel' bg-color='#00000040'>
+      <vertical spacing='1' pref-height='68' active='~GeneralTabActive'>
+        <toggle-setting text='Enabled' value='Enabled' />
+        <string-setting text='Attention text color' value='AttentionDisplayColorHex' apply-on-change='true' />
+        <string-setting text='Attention Play button color' value='PlayButtonAttentionColorHex' apply-on-change='true' />
+        <string-setting text='Attention Play button text color' value='PlayButtonAttentionTextColorHex' apply-on-change='true' />
+        <string-setting text='Confirm button color' value='PlayConfirmColorHex' apply-on-change='true' />
+        <string-setting text='Confirm button text' value='PlayConfirmText' apply-on-change='true' />
+        <string-setting text='Confirm countdown seconds' value='PlayConfirmDurationSecondsText' apply-on-change='true' />
+      </vertical>
 
-    <text text='Attention Categories' font-size='3.8' active='~GeneralTabActive' />
-    <toggle-setting text='Mute' value='ShowMute' active='~GeneralTabActive' />
-    <toggle-setting text='Not For Streaming' value='ShowNotForStreaming' active='~GeneralTabActive' />
-    <toggle-setting text='Not For Video' value='ShowNotForVideo' active='~GeneralTabActive' />
-    <toggle-setting text='Stage Gimmick' value='ShowStageGimmick' active='~GeneralTabActive' />
-    <toggle-setting text='Phobia' value='ShowPhobia' active='~GeneralTabActive' />
-    <toggle-setting text='Jumpscare' value='ShowJumpscare' active='~GeneralTabActive' />
-    <toggle-setting text='Heavy' value='ShowHeavy' active='~GeneralTabActive' />
-    <toggle-setting text='Other' value='ShowOther' active='~GeneralTabActive' />
+      <vertical spacing='1' pref-height='68' active='~AttentionTabActive'>
+        <text text='Attention Categories' font-size='3.8' />
+        <toggle-setting text='Mute' value='ShowMute' />
+        <toggle-setting text='Not For Streaming' value='ShowNotForStreaming' />
+        <toggle-setting text='Not For Video' value='ShowNotForVideo' />
+        <toggle-setting text='Stage Gimmick' value='ShowStageGimmick' />
+        <toggle-setting text='Phobia' value='ShowPhobia' />
+        <toggle-setting text='Jumpscare' value='ShowJumpscare' />
+        <toggle-setting text='Heavy' value='ShowHeavy' />
+        <toggle-setting text='Other' value='ShowOther' />
+      </vertical>
 
-    <button text='今すぐ更新' on-click='RefreshNow' active='~GeneralTabActive' />
-    <text text='~ReportText' font-size='3.0' font-align='Center' active='~GeneralTabActive' />
-    <text text='~LastMessage' font-size='3.0' active='~GeneralTabActive' />
+      <vertical spacing='1' pref-height='68' active='~PrefixTabActive'>
+        <text text='Category Prefixes' font-size='3.8' />
+        <string-setting text='Mute prefix' value='PrefixMute' apply-on-change='true' />
+        <string-setting text='Not For Streaming prefix' value='PrefixNotForStreaming' apply-on-change='true' />
+        <string-setting text='Not For Video prefix' value='PrefixNotForVideo' apply-on-change='true' />
+        <string-setting text='Stage Gimmick prefix' value='PrefixStageGimmick' apply-on-change='true' />
+        <string-setting text='Phobia prefix' value='PrefixPhobia' apply-on-change='true' />
+        <string-setting text='Jumpscare prefix' value='PrefixJumpscare' apply-on-change='true' />
+        <string-setting text='Heavy prefix' value='PrefixHeavy' apply-on-change='true' />
+        <string-setting text='Other prefix' value='PrefixOther' apply-on-change='true' />
+      </vertical>
 
-    <text text='Category Prefixes' font-size='3.8' active='~PrefixTabActive' />
-    <string-setting text='Mute prefix' value='PrefixMute' apply-on-change='true' active='~PrefixTabActive' />
-    <string-setting text='Not For Streaming prefix' value='PrefixNotForStreaming' apply-on-change='true' active='~PrefixTabActive' />
-    <string-setting text='Not For Video prefix' value='PrefixNotForVideo' apply-on-change='true' active='~PrefixTabActive' />
-    <string-setting text='Stage Gimmick prefix' value='PrefixStageGimmick' apply-on-change='true' active='~PrefixTabActive' />
-    <string-setting text='Phobia prefix' value='PrefixPhobia' apply-on-change='true' active='~PrefixTabActive' />
-    <string-setting text='Jumpscare prefix' value='PrefixJumpscare' apply-on-change='true' active='~PrefixTabActive' />
-    <string-setting text='Heavy prefix' value='PrefixHeavy' apply-on-change='true' active='~PrefixTabActive' />
-    <string-setting text='Other prefix' value='PrefixOther' apply-on-change='true' active='~PrefixTabActive' />
-    <text text='~LastMessage' font-size='3.0' active='~PrefixTabActive' />
+      <vertical spacing='1' pref-height='68' active='~PositionTabActive'>
+        <text text='Attention Position' font-size='3.6' />
+        <horizontal spacing='1' child-control-width='false' child-expand-width='false'>
+          <vertical pref-width='28'>
+            <button text='X -1' on-click='OffsetXMinus' />
+          </vertical>
+          <vertical pref-width='12'>
+            <text text='~PositionOffsetX' font-size='3.2' font-align='Center' />
+          </vertical>
+          <vertical pref-width='28'>
+            <button text='X +1' on-click='OffsetXPlus' />
+          </vertical>
+        </horizontal>
 
-    <text text='Attention Position' font-size='3.6' active='~PositionTabActive' />
-
-    <vertical spacing='1' active='~PositionTabActive'>
-      <horizontal spacing='1' child-control-width='false' child-expand-width='false'>
-        <vertical pref-width='28'>
-          <button text='X -1' on-click='OffsetXMinus' />
-        </vertical>
-        <vertical pref-width='12'>
-          <text text='~PositionOffsetX' font-size='3.2' font-align='Center' />
-        </vertical>
-        <vertical pref-width='28'>
-          <button text='X +1' on-click='OffsetXPlus' />
-        </vertical>
-      </horizontal>
-
-      <horizontal spacing='1' child-control-width='false' child-expand-width='false'>
-        <vertical pref-width='28'>
-          <button text='Y -1' on-click='OffsetYMinus' />
-        </vertical>
-        <vertical pref-width='12'>
-          <text text='~PositionOffsetY' font-size='3.2' font-align='Center' />
-        </vertical>
-        <vertical pref-width='28'>
-          <button text='Y +1' on-click='OffsetYPlus' />
-        </vertical>
-      </horizontal>
+        <horizontal spacing='1' child-control-width='false' child-expand-width='false'>
+          <vertical pref-width='28'>
+            <button text='Y -1' on-click='OffsetYMinus' />
+          </vertical>
+          <vertical pref-width='12'>
+            <text text='~PositionOffsetY' font-size='3.2' font-align='Center' />
+          </vertical>
+          <vertical pref-width='28'>
+            <button text='Y +1' on-click='OffsetYPlus' />
+          </vertical>
+        </horizontal>
+      </vertical>
     </vertical>
-
   </vertical>
 </bg>
