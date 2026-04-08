@@ -19,7 +19,7 @@ Beat Saber 向けの〝⚠️アテンション情報〟を表示するプラグ
 
 ## 導入方法
 
-- [リリース](https://github.com/USAGI-NETWORK/unbs-attention/releases)のアセットで配布の UnbsAttention.dll を手動ないし BSManager などを使い Beat Saber の Plugins フォルダーへ配置
+- [リリース](https://github.com/usagi/unbs-attention/releases)のアセットで配布の UnbsAttention.dll を手動ないし BSManager などを使い Beat Saber の Plugins フォルダーへ配置
 - 動作に必要な他のプラグインが未導入なら同様に配置
 
 ## 使い方: とりあえずデフォルト動作させてみたい方
