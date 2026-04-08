@@ -26,6 +26,8 @@ public sealed class AttentionPluginRuntime
  private bool _excludedCategoriesForMatchingDirty = true;
  private long _dataRevision;
 
+ public event Action<long>? DataRevisionChanged;
+
  public void Init(PluginConfig config)
  {
   _config = config;
@@ -89,7 +91,8 @@ public sealed class AttentionPluginRuntime
   var next = BuildEffectiveDatabase(remote);
   _effectiveDatabase = next;
   RebuildMatcherIndex();
-  Interlocked.Increment(ref _dataRevision);
+  var dataRevision = Interlocked.Increment(ref _dataRevision);
+  NotifyDataRevisionChanged(dataRevision);
   InvalidateMatchingCaches();
   var nextSignature = CreateSignature(_effectiveDatabase);
   return string.Equals(previousSignature, nextSignature, StringComparison.Ordinal) ? 0 : 1;
@@ -948,6 +951,18 @@ public sealed class AttentionPluginRuntime
 
   var match = Regex.Match(levelId, "custom_level_([a-fA-F0-9]{40})", RegexOptions.IgnoreCase);
   return match.Success ? match.Groups[1].Value : null;
+ }
+
+ private void NotifyDataRevisionChanged(long revision)
+ {
+  try
+  {
+   DataRevisionChanged?.Invoke(revision);
+  }
+  catch
+  {
+   // Notification handlers should not break runtime merge/update flow.
+  }
  }
 
  private sealed class DescriptionCacheEntry

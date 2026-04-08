@@ -3,6 +3,7 @@ using System.Reflection;
 using UnbsAttention.Models;
 using UnbsAttention.Services;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace UnbsAttention.Presentation;
 
@@ -14,22 +15,26 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private static readonly Color DefaultPlayButtonAttentionTextColor = new(0f, 0f, 0f, 1f);
  private static readonly Color DefaultPlayButtonConfirmColor = new(1f, 0.35f, 0.2f, 1f);
  private static readonly Color DefaultPlayButtonOutlineColor = new(0f, 0f, 0f, 1f);
- private const float RefreshIntervalSeconds = 0.75f;
- private const float AttachProbeIntervalSeconds = 0.2f;
- private const float InactiveSongSelectionProbeIntervalSeconds = 1.0f;
- private const int SongSelectionMissThreshold = 3;
- private const float DetailLookupMinIntervalSeconds = 0.35f;
- private const float DetailLookupMaxIntervalSeconds = 1.25f;
+
+ private sealed class EventSubscription
+ {
+  public object Target { get; set; } = null!;
+
+  public EventInfo? EventInfo { get; set; }
+
+  public FieldInfo? DelegateField { get; set; }
+
+  public Delegate Handler { get; set; } = null!;
+ }
 
  private AttentionPluginRuntime? _runtime;
  private CancellationTokenSource? _cts;
+ private readonly List<EventSubscription> _menuControllerSubscriptions = new();
+ private EventSubscription? _gameTransitionSubscription;
+ private bool _sceneHooksInstalled;
  private bool _songSelectionActive;
- private int _songSelectionMissCount;
- private float _lastSongSelectionStateProbeAt = float.MinValue;
- private float _lastRefreshAt;
- private float _lastAttachProbeAt = float.MinValue;
- private float _lastDetailLookupAt;
- private float _detailLookupIntervalSeconds = DetailLookupMinIntervalSeconds;
+ private int _pendingAttachRequest;
+ private int _pendingRefreshRequest;
  private bool _refreshInFlight;
  private string? _displayText;
  private string _lastAppliedDisplayText = string.Empty;
@@ -76,8 +81,18 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
 
  public void Bind(AttentionPluginRuntime runtime)
  {
+  if (_runtime is not null)
+  {
+   _runtime.DataRevisionChanged -= OnRuntimeDataRevisionChanged;
+  }
+
   _runtime = runtime;
-  _cts = new CancellationTokenSource();
+  _runtime.DataRevisionChanged += OnRuntimeDataRevisionChanged;
+  _cts ??= new CancellationTokenSource();
+
+  InstallSceneHooksIfNeeded();
+  TryInstallGameTransitionHook();
+  RebindMenuControllerEvents();
  }
 
  private void Update()
@@ -88,10 +103,10 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   }
 
   var now = Time.unscaledTime;
-
-  ProbeSongSelectionState(now);
   if (!_songSelectionActive)
   {
+   Interlocked.Exchange(ref _pendingAttachRequest, 0);
+   Interlocked.Exchange(ref _pendingRefreshRequest, 0);
    return;
   }
 
@@ -100,9 +115,8 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    _playConfirmModalVisible = false;
   }
 
-  if (now - _lastAttachProbeAt >= AttachProbeIntervalSeconds)
+  if (Interlocked.Exchange(ref _pendingAttachRequest, 0) == 1)
   {
-   _lastAttachProbeAt = now;
    EnsureCurvedTextAttached();
   }
 
@@ -113,67 +127,355 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    return;
   }
 
-  if (now - _lastRefreshAt < RefreshIntervalSeconds)
+  if (Interlocked.Exchange(ref _pendingRefreshRequest, 0) == 1)
+  {
+   _ = RefreshAsync(_cts.Token);
+  }
+ }
+
+ private void InstallSceneHooksIfNeeded()
+ {
+  if (_sceneHooksInstalled)
   {
    return;
   }
 
-  _lastRefreshAt = now;
+  SceneManager.activeSceneChanged += OnActiveSceneChanged;
+  _sceneHooksInstalled = true;
 
-  _ = RefreshAsync(_cts.Token);
+  OnActiveSceneChanged(default, SceneManager.GetActiveScene());
  }
 
-   private void ProbeSongSelectionState(float now)
+ private void OnActiveSceneChanged(Scene previousScene, Scene nextScene)
+ {
+  if (IsMenuScene(nextScene.name))
+  {
+   TryInstallGameTransitionHook();
+   RebindMenuControllerEvents();
+   return;
+  }
+
+  ClearMenuControllerEventSubscriptions();
+  ClearGameTransitionHook();
+  _cachedDetailController = null;
+
+  if (_songSelectionActive)
+  {
+   _songSelectionActive = false;
+   OnSongSelectionDeactivated();
+  }
+ }
+
+ private static bool IsMenuScene(string sceneName)
+ {
+  return sceneName.IndexOf("menu", StringComparison.OrdinalIgnoreCase) >= 0;
+ }
+
+ private void TryInstallGameTransitionHook()
+ {
+  if (_gameTransitionSubscription is not null)
+  {
+   return;
+  }
+
+  var manager = Resources.FindObjectsOfTypeAll<MonoBehaviour>()
+   .FirstOrDefault(x => x is not null && string.Equals(x.GetType().Name, "GameScenesManager", StringComparison.Ordinal));
+  if (manager is null)
+  {
+   return;
+  }
+
+  var handlerMethod = GetType().GetMethod(nameof(OnGameTransitionDidFinish), InstanceFlags);
+  if (handlerMethod is null)
+  {
+   return;
+  }
+
+  if (!TryBindEvent(manager, "transitionDidFinishEvent", handlerMethod, out var subscription) || subscription is null)
+  {
+   return;
+  }
+
+  _gameTransitionSubscription = subscription;
+ }
+
+ private void OnGameTransitionDidFinish(object sceneTransitionType, object transitionSetupData, object diContainer)
+ {
+  RebindMenuControllerEvents();
+ }
+
+ private void RebindMenuControllerEvents()
+ {
+  ClearMenuControllerEventSubscriptions();
+
+    _cachedDetailController = FindStandardLevelDetailViewController(requireUsable: false);
+  if (_cachedDetailController is null)
+  {
+   return;
+  }
+
+  var boundAny = false;
+  boundAny |= TryBindMenuControllerEvent(_cachedDetailController, "didActivateEvent", nameof(OnDetailDidActivate));
+  boundAny |= TryBindMenuControllerEvent(_cachedDetailController, "didDeactivateEvent", nameof(OnDetailDidDeactivate));
+  boundAny |= TryBindMenuControllerEvent(_cachedDetailController, "didChangeDifficultyBeatmapEvent", nameof(OnMenuSelectionChangedOneArg));
+
+  var levelCollectionController = FindComponentByTypeName("LevelCollectionViewController");
+  if (levelCollectionController is not null)
+  {
+   boundAny |= TryBindMenuControllerEvent(levelCollectionController, "didSelectLevelEvent", nameof(OnMenuSelectionChangedTwoArgs));
+  }
+
+  var characteristicController = FindComponentByTypeName("BeatmapCharacteristicSegmentedControlController");
+  if (characteristicController is not null)
+  {
+   boundAny |= TryBindMenuControllerEvent(characteristicController, "didSelectBeatmapCharacteristicEvent", nameof(OnMenuSelectionChangedTwoArgs));
+  }
+
+    if (!boundAny)
+  {
+   return;
+  }
+
+    if (!IsUsableDetailController(_cachedDetailController))
+    {
+     return;
+    }
+
+  if (!_songSelectionActive)
+  {
+   _songSelectionActive = true;
+   OnSongSelectionActivated();
+   return;
+  }
+
+  RequestAttachAndRefresh();
+ }
+
+ private static Component? FindComponentByTypeName(string typeName)
+ {
+  Component? fallback = null;
+
+  foreach (var component in Resources.FindObjectsOfTypeAll<Component>())
+  {
+   if (component is null)
    {
-    var probeInterval = _songSelectionActive
-     ? AttachProbeIntervalSeconds
-     : InactiveSongSelectionProbeIntervalSeconds;
-    if (now - _lastSongSelectionStateProbeAt < probeInterval)
-    {
-     return;
-    }
-
-    _lastSongSelectionStateProbeAt = now;
-    var active = ResolveDetailController() is not null;
-
-    if (active)
-    {
-     _songSelectionMissCount = 0;
-     if (_songSelectionActive)
-     {
-      return;
-     }
-
-     _songSelectionActive = true;
-     OnSongSelectionActivated();
-     return;
-    }
-
-    if (!_songSelectionActive)
-    {
-     return;
-    }
-
-    _songSelectionMissCount++;
-    if (_songSelectionMissCount < SongSelectionMissThreshold)
-    {
-     return;
-    }
-
-    _songSelectionActive = false;
-    OnSongSelectionDeactivated();
+    continue;
    }
+
+   if (!string.Equals(component.GetType().Name, typeName, StringComparison.Ordinal))
+   {
+    continue;
+   }
+
+  if (component is Behaviour behaviour && behaviour.isActiveAndEnabled)
+   {
+    return component;
+   }
+
+   fallback ??= component;
+  }
+
+  return fallback;
+ }
+
+ private bool TryBindMenuControllerEvent(object target, string eventName, string handlerMethodName)
+ {
+  var method = GetType().GetMethod(handlerMethodName, InstanceFlags);
+  if (method is null)
+  {
+   return false;
+  }
+
+  if (!TryBindEvent(target, eventName, method, out var subscription) || subscription is null)
+  {
+   return false;
+  }
+
+  _menuControllerSubscriptions.Add(subscription);
+  return true;
+ }
+
+ private static FieldInfo? FindDelegateField(Type type, string eventName)
+ {
+  for (var cursor = type; cursor is not null; cursor = cursor.BaseType)
+  {
+   var field = cursor.GetField(eventName, InstanceFlags)
+    ?? cursor.GetField("m_" + eventName, InstanceFlags)
+    ?? cursor.GetField("_" + eventName, InstanceFlags);
+   if (field is not null && typeof(Delegate).IsAssignableFrom(field.FieldType))
+   {
+    return field;
+   }
+  }
+
+  return null;
+ }
+
+ private bool TryBindEvent(object target, string eventName, MethodInfo handlerMethod, out EventSubscription? subscription)
+ {
+  subscription = null;
+  var type = target.GetType();
+
+  var eventInfo = type.GetEvent(eventName, InstanceFlags);
+  if (eventInfo?.EventHandlerType is not null)
+  {
+   var handler = Delegate.CreateDelegate(eventInfo.EventHandlerType, this, handlerMethod, false);
+   if (handler is not null)
+   {
+    eventInfo.AddEventHandler(target, handler);
+    subscription = new EventSubscription
+    {
+     Target = target,
+     EventInfo = eventInfo,
+     Handler = handler,
+    };
+
+    return true;
+   }
+  }
+
+  var delegateField = FindDelegateField(type, eventName);
+  if (delegateField is null)
+  {
+   return false;
+  }
+
+  var delegateType = delegateField.FieldType;
+  if (!typeof(Delegate).IsAssignableFrom(delegateType))
+  {
+   return false;
+  }
+
+  var fieldHandler = Delegate.CreateDelegate(delegateType, this, handlerMethod, false);
+  if (fieldHandler is null)
+  {
+   return false;
+  }
+
+  var current = delegateField.GetValue(target) as Delegate;
+  delegateField.SetValue(target, Delegate.Combine(current, fieldHandler));
+
+  subscription = new EventSubscription
+  {
+   Target = target,
+   DelegateField = delegateField,
+   Handler = fieldHandler,
+  };
+
+  return true;
+ }
+
+ private static void UnbindEvent(EventSubscription subscription)
+ {
+  try
+  {
+   if (subscription.EventInfo is not null)
+   {
+    subscription.EventInfo.RemoveEventHandler(subscription.Target, subscription.Handler);
+    return;
+   }
+
+   if (subscription.DelegateField is null)
+   {
+    return;
+   }
+
+   var current = subscription.DelegateField.GetValue(subscription.Target) as Delegate;
+   subscription.DelegateField.SetValue(subscription.Target, Delegate.Remove(current, subscription.Handler));
+  }
+  catch
+  {
+  }
+ }
+
+ private void ClearMenuControllerEventSubscriptions()
+ {
+  foreach (var subscription in _menuControllerSubscriptions)
+  {
+   UnbindEvent(subscription);
+  }
+
+  _menuControllerSubscriptions.Clear();
+ }
+
+ private void ClearGameTransitionHook()
+ {
+  if (_gameTransitionSubscription is null)
+  {
+   return;
+  }
+
+  UnbindEvent(_gameTransitionSubscription);
+  _gameTransitionSubscription = null;
+ }
+
+ private void OnDetailDidActivate(bool firstActivation, bool addedToHierarchy, bool screenSystemEnabling)
+ {
+  if (!_songSelectionActive)
+  {
+   _songSelectionActive = true;
+   OnSongSelectionActivated();
+   return;
+  }
+
+  RequestAttachAndRefresh();
+ }
+
+ private void OnDetailDidDeactivate(bool removedFromHierarchy, bool screenSystemDisabling)
+ {
+  if (!_songSelectionActive)
+  {
+   return;
+  }
+
+  _songSelectionActive = false;
+  OnSongSelectionDeactivated();
+ }
+
+ private void OnMenuSelectionChangedOneArg(object arg)
+ {
+  if (!_songSelectionActive)
+  {
+   return;
+  }
+
+  RequestAttachAndRefresh();
+ }
+
+ private void OnMenuSelectionChangedTwoArgs(object arg0, object arg1)
+ {
+  if (!_songSelectionActive)
+  {
+   return;
+  }
+
+  RequestAttachAndRefresh();
+ }
+
+ private void OnRuntimeDataRevisionChanged(long revision)
+ {
+  if (!_songSelectionActive)
+  {
+   return;
+  }
+
+  Interlocked.Exchange(ref _pendingRefreshRequest, 1);
+ }
+
+ private void RequestAttachAndRefresh()
+ {
+  Interlocked.Exchange(ref _pendingAttachRequest, 1);
+  Interlocked.Exchange(ref _pendingRefreshRequest, 1);
+ }
 
    private void OnSongSelectionActivated()
    {
-    _lastAttachProbeAt = float.MinValue;
-    _lastRefreshAt = 0f;
       _displayText = null;
       _lastAppliedDisplayText = string.Empty;
       _hasAppliedDisplayStyle = false;
     _lastLevelId = string.Empty;
     _lastDataRevision = -1;
-      _songSelectionMissCount = 0;
+    RequestAttachAndRefresh();
     LogInfo("[UNBS] Song selection activated.");
    }
 
@@ -184,7 +486,8 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     _hasAppliedDisplayStyle = false;
     _lastLevelId = string.Empty;
     _lastDataRevision = -1;
-      _songSelectionMissCount = 0;
+    Interlocked.Exchange(ref _pendingAttachRequest, 0);
+    Interlocked.Exchange(ref _pendingRefreshRequest, 0);
     _cachedDetailController = null;
 
     if (_curvedTextObject is not null)
@@ -310,28 +613,10 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  {
   if (_cachedDetailController is not null && IsUsableDetailController(_cachedDetailController))
   {
-     _detailLookupIntervalSeconds = DetailLookupMinIntervalSeconds;
    return _cachedDetailController;
   }
 
-  _cachedDetailController = null;
-
-  var now = Time.unscaledTime;
-  if (now - _lastDetailLookupAt < _detailLookupIntervalSeconds)
-  {
-   return null;
-  }
-
-  _lastDetailLookupAt = now;
-  _cachedDetailController = FindStandardLevelDetailViewController();
-
-  if (_cachedDetailController is null)
-  {
-   _detailLookupIntervalSeconds = Mathf.Min(DetailLookupMaxIntervalSeconds, _detailLookupIntervalSeconds * 1.5f);
-   return null;
-  }
-
-  _detailLookupIntervalSeconds = DetailLookupMinIntervalSeconds;
+  _cachedDetailController = FindStandardLevelDetailViewController(requireUsable: true);
   return _cachedDetailController;
  }
 
@@ -1283,7 +1568,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   return null;
  }
 
- private static MonoBehaviour? FindStandardLevelDetailViewController()
+private static MonoBehaviour? FindStandardLevelDetailViewController(bool requireUsable)
  {
     var allMonoBehaviours = Resources.FindObjectsOfTypeAll<MonoBehaviour>();
     foreach (var monoBehaviour in allMonoBehaviours)
@@ -1293,13 +1578,13 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     continue;
    }
 
-   if (!IsUsableDetailController(monoBehaviour))
+   var type = monoBehaviour.GetType();
+   if (!string.Equals(type.Name, "StandardLevelDetailViewController", StringComparison.Ordinal))
    {
     continue;
    }
 
-   var type = monoBehaviour.GetType();
-   if (!string.Equals(type.Name, "StandardLevelDetailViewController", StringComparison.Ordinal))
+   if (requireUsable && !IsUsableDetailController(monoBehaviour))
    {
     continue;
    }
@@ -2304,6 +2589,21 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
 
  private void OnDestroy()
  {
+  if (_runtime is not null)
+  {
+   _runtime.DataRevisionChanged -= OnRuntimeDataRevisionChanged;
+   _runtime = null;
+  }
+
+  if (_sceneHooksInstalled)
+  {
+   SceneManager.activeSceneChanged -= OnActiveSceneChanged;
+   _sceneHooksInstalled = false;
+  }
+
+  ClearMenuControllerEventSubscriptions();
+  ClearGameTransitionHook();
+
   try
   {
    _cts?.Cancel();
