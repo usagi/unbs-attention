@@ -3,10 +3,12 @@ using System.Reflection;
 using UnbsAttention.Models;
 using UnbsAttention.Services;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
 
 namespace UnbsAttention.Presentation;
 
+[DefaultExecutionOrder(10000)]
 public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
 {
  private static readonly BindingFlags InstanceFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -15,6 +17,9 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private static readonly Color DefaultPlayButtonAttentionTextColor = new(0f, 0f, 0f, 1f);
  private static readonly Color DefaultPlayButtonConfirmColor = new(1f, 0.35f, 0.2f, 1f);
  private static readonly Color DefaultPlayButtonOutlineColor = new(0f, 0f, 0f, 1f);
+ private const float VisualMaintenanceIntervalSeconds = 0.15f;
+ private const float TintMaintenanceIntervalSeconds = 0.1f;
+ private const float TintDriftBoostSeconds = 0.35f;
 
  private sealed class EventSubscription
  {
@@ -27,20 +32,57 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   public Delegate Handler { get; set; } = null!;
  }
 
+ private sealed class PlayPointerEventRelay : MonoBehaviour,
+  IPointerEnterHandler,
+  IPointerExitHandler,
+  ISelectHandler,
+  IDeselectHandler
+ {
+  public Action? OnStateChanged;
+  public Action<bool>? OnHoverChanged;
+
+  public void OnPointerEnter(PointerEventData eventData)
+  {
+   OnHoverChanged?.Invoke(true);
+   OnStateChanged?.Invoke();
+  }
+
+  public void OnPointerExit(PointerEventData eventData)
+  {
+   OnHoverChanged?.Invoke(false);
+   OnStateChanged?.Invoke();
+  }
+
+  public void OnSelect(BaseEventData eventData)
+  {
+   OnStateChanged?.Invoke();
+  }
+
+  public void OnDeselect(BaseEventData eventData)
+  {
+   OnStateChanged?.Invoke();
+  }
+ }
+
  private AttentionPluginRuntime? _runtime;
  private CancellationTokenSource? _cts;
  private readonly List<EventSubscription> _menuControllerSubscriptions = new();
  private EventSubscription? _gameTransitionSubscription;
  private bool _sceneHooksInstalled;
  private bool _songSelectionActive;
+ private bool _playPointerHovering;
  private int _pendingAttachRequest;
  private int _pendingRefreshRequest;
+ private int _pendingTintRefreshRequest;
+ private float _nextVisualMaintenanceAt = float.MinValue;
+ private float _nextTintMaintenanceAt = float.MinValue;
+ private float _tintDriftBoostUntil = float.MinValue;
  private bool _refreshInFlight;
  private string? _displayText;
  private string _lastAppliedDisplayText = string.Empty;
  private Color _lastAppliedDisplayColor = Color.clear;
  private bool _hasAppliedDisplayStyle;
- private string _lastLevelId = string.Empty;
+ private string _lastLookupSnapshotKey = string.Empty;
  private MonoBehaviour? _cachedDetailController;
  private GameObject? _curvedTextObject;
  private Component? _curvedTextComponent;
@@ -61,6 +103,8 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private bool _playOriginalSelectableColorsCaptured;
  private object? _playOriginalSelectableColors;
  private Component? _playClickInterceptTarget;
+ private Component? _playPointerRelayTarget;
+ private PlayPointerEventRelay? _playPointerEventRelay;
  private object? _playOriginalOnClickEvent;
  private object? _playInterceptOnClickEvent;
  private bool _playInterceptInstalled;
@@ -78,6 +122,25 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private float _lastTintTraceAt = float.MinValue;
  private int _tintTraceCount;
  private long _lastDataRevision = -1;
+ private string _cachedAttentionDisplayColorHex = string.Empty;
+ private Color _cachedAttentionDisplayColor = DefaultAttentionDisplayColor;
+ private string _cachedPlayButtonAttentionColorHex = string.Empty;
+ private Color _cachedPlayButtonAttentionColor = DefaultPlayButtonAttentionColor;
+ private string _cachedPlayButtonAttentionTextColorHex = string.Empty;
+ private Color _cachedPlayButtonAttentionTextColor = DefaultPlayButtonAttentionTextColor;
+ private string _cachedPlayButtonConfirmColorHex = string.Empty;
+ private Color _cachedPlayButtonConfirmColor = DefaultPlayButtonConfirmColor;
+
+ private void OnEnable()
+ {
+  Application.onBeforeRender -= OnBeforeRender;
+  Application.onBeforeRender += OnBeforeRender;
+ }
+
+ private void OnDisable()
+ {
+  Application.onBeforeRender -= OnBeforeRender;
+ }
 
  public void Bind(AttentionPluginRuntime runtime)
  {
@@ -107,12 +170,14 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   {
    Interlocked.Exchange(ref _pendingAttachRequest, 0);
    Interlocked.Exchange(ref _pendingRefreshRequest, 0);
+    Interlocked.Exchange(ref _pendingTintRefreshRequest, 0);
    return;
   }
 
   if (_playConfirmModalVisible && now > _playConfirmArmedUntil)
   {
    _playConfirmModalVisible = false;
+    RequestTintRefresh();
   }
 
   if (Interlocked.Exchange(ref _pendingAttachRequest, 0) == 1)
@@ -120,7 +185,21 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    EnsureCurvedTextAttached();
   }
 
-  ApplyDisplayToCurvedText();
+  var runVisualMaintenance = now >= _nextVisualMaintenanceAt;
+  if (runVisualMaintenance)
+  {
+   _nextVisualMaintenanceAt = now + VisualMaintenanceIntervalSeconds;
+  }
+
+  var runTintMaintenance = now >= _nextTintMaintenanceAt;
+  if (runTintMaintenance)
+  {
+   _nextTintMaintenanceAt = now + TintMaintenanceIntervalSeconds;
+  }
+
+  var forceTintRefresh = Interlocked.Exchange(ref _pendingTintRefreshRequest, 0) == 1;
+  var boostedDriftCheck = _playPointerHovering || now <= _tintDriftBoostUntil;
+  ApplyDisplayToCurvedText(runVisualMaintenance, runTintMaintenance || forceTintRefresh || boostedDriftCheck);
 
   if (_refreshInFlight)
   {
@@ -131,6 +210,38 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   {
    _ = RefreshAsync(_cts.Token);
   }
+ }
+
+ private void LateUpdate()
+ {
+  if (_runtime is null || _cts is null || !_songSelectionActive)
+  {
+   return;
+  }
+
+  var attentionActive = !string.IsNullOrWhiteSpace(_displayText);
+  if (!attentionActive)
+  {
+   return;
+  }
+
+  UpdatePlayButtonTint(attentionActive, true, forceApply: true);
+ }
+
+ private void OnBeforeRender()
+ {
+  if (_runtime is null || _cts is null || !_songSelectionActive)
+  {
+   return;
+  }
+
+  var attentionActive = !string.IsNullOrWhiteSpace(_displayText);
+  if (!attentionActive)
+  {
+   return;
+  }
+
+  UpdatePlayButtonTint(attentionActive, true, forceApply: true);
  }
 
  private void InstallSceneHooksIfNeeded()
@@ -157,6 +268,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
 
   ClearMenuControllerEventSubscriptions();
   ClearGameTransitionHook();
+  ClearPlayPointerEventRelay();
   _cachedDetailController = null;
 
   if (_songSelectionActive)
@@ -466,6 +578,16 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  {
   Interlocked.Exchange(ref _pendingAttachRequest, 1);
   Interlocked.Exchange(ref _pendingRefreshRequest, 1);
+  Interlocked.Exchange(ref _pendingTintRefreshRequest, 1);
+  _nextVisualMaintenanceAt = float.MinValue;
+  _nextTintMaintenanceAt = float.MinValue;
+ }
+
+ private void RequestTintRefresh()
+ {
+  Interlocked.Exchange(ref _pendingTintRefreshRequest, 1);
+  _nextTintMaintenanceAt = float.MinValue;
+  _tintDriftBoostUntil = Mathf.Max(_tintDriftBoostUntil, Time.unscaledTime + TintDriftBoostSeconds);
  }
 
    private void OnSongSelectionActivated()
@@ -473,8 +595,12 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
       _displayText = null;
       _lastAppliedDisplayText = string.Empty;
       _hasAppliedDisplayStyle = false;
-    _lastLevelId = string.Empty;
+    _lastLookupSnapshotKey = string.Empty;
     _lastDataRevision = -1;
+    _nextVisualMaintenanceAt = float.MinValue;
+    _nextTintMaintenanceAt = float.MinValue;
+    _tintDriftBoostUntil = float.MinValue;
+    _playPointerHovering = false;
     RequestAttachAndRefresh();
     LogInfo("[UNBS] Song selection activated.");
    }
@@ -484,10 +610,15 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     _displayText = null;
     _lastAppliedDisplayText = string.Empty;
     _hasAppliedDisplayStyle = false;
-    _lastLevelId = string.Empty;
+    _lastLookupSnapshotKey = string.Empty;
     _lastDataRevision = -1;
+    _nextVisualMaintenanceAt = float.MinValue;
+    _nextTintMaintenanceAt = float.MinValue;
+    _tintDriftBoostUntil = float.MinValue;
+    _playPointerHovering = false;
     Interlocked.Exchange(ref _pendingAttachRequest, 0);
     Interlocked.Exchange(ref _pendingRefreshRequest, 0);
+    Interlocked.Exchange(ref _pendingTintRefreshRequest, 0);
     _cachedDetailController = null;
 
     if (_curvedTextObject is not null)
@@ -500,6 +631,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     _currentPracticeAnchor = null;
     _currentActionAnchor = null;
     _lastTintTargetRoot = null;
+    ClearPlayPointerEventRelay();
     RestorePlayButtonVisualState();
     ResetPlayIntercept();
     LogInfo("[UNBS] Song selection deactivated.");
@@ -552,7 +684,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     _currentActionAnchor = null;
     _lastTintTargetRoot = null;
     ResetPlayIntercept();
-     UpdatePlayButtonTint(false);
+    UpdatePlayButtonTint(false, true);
    return;
   }
 
@@ -592,7 +724,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     _currentActionAnchor = null;
       _lastTintTargetRoot = null;
       ResetPlayIntercept();
-      UpdatePlayButtonTint(false);
+      UpdatePlayButtonTint(false, true);
     return;
   }
 
@@ -620,7 +752,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   return _cachedDetailController;
  }
 
- private void ApplyDisplayToCurvedText()
+private void ApplyDisplayToCurvedText(bool runVisualMaintenance, bool runTintMaintenance)
  {
   if (_curvedTextObject is null)
   {
@@ -633,22 +765,29 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   if (hasText && _curvedTextComponent is not null)
   {
    var nextText = _displayText!;
+    var textChanged = false;
    if (!string.Equals(_lastAppliedDisplayText, nextText, StringComparison.Ordinal))
    {
     SetTextOnComponent(_curvedTextComponent, nextText);
     _lastAppliedDisplayText = nextText;
+     textChanged = true;
    }
 
    var displayColor = GetAttentionDisplayColor();
+    var styleChanged = false;
    if (!_hasAppliedDisplayStyle || _lastAppliedDisplayColor != displayColor)
    {
     TrySetColorOnComponent(_curvedTextComponent, displayColor);
     TrySetLeftAlignment(_curvedTextComponent);
     _lastAppliedDisplayColor = displayColor;
     _hasAppliedDisplayStyle = true;
+     styleChanged = true;
    }
 
-   PositionCurvedTextUnderPlayArea();
+    if (runVisualMaintenance || textChanged || styleChanged)
+    {
+     PositionCurvedTextUnderPlayArea();
+    }
   }
   else if (!hasText)
   {
@@ -670,7 +809,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    }
   }
 
-  UpdatePlayButtonTint(hasText);
+  UpdatePlayButtonTint(hasText, runTintMaintenance);
  }
 
  private void EnsurePlayClickIntercept(bool attentionActive)
@@ -802,6 +941,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     var started = InvokeOriginalPlayWithTemporaryRestore();
     _playBypassOnce = false;
     _playConfirmModalVisible = !started;
+    RequestTintRefresh();
     if (started)
     {
      LogInfo("[UNBS] Play confirmation accepted via second press.");
@@ -816,6 +956,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   _playConfirmModalVisible = true;
     var durationSeconds = GetPlayButtonConfirmDurationSeconds();
     _playConfirmArmedUntil = Time.unscaledTime + durationSeconds;
+    RequestTintRefresh();
       LogInfo("[UNBS] Play confirmation armed. Press Play again within " + durationSeconds + " seconds to start.");
  }
 
@@ -899,6 +1040,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   _playConfirmModalVisible = false;
   _playInterceptDisabledDueToError = false;
   RestorePlayClickIntercept();
+    RequestTintRefresh();
     InvalidatePlayButtonTintState();
  }
 
@@ -921,7 +1063,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  }
 
  private static bool TrySetOnClickEvent(Component component, object evt)
- {
+{
   var type = component.GetType();
 
   var prop = type.GetProperty("onClick", InstanceFlags);
@@ -1121,7 +1263,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   SetPlayTintTargets(_currentPlayAnchor);
  }
 
- private void UpdatePlayButtonTint(bool attentionActive)
+private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bool forceApply = false)
  {
   var confirmActive = attentionActive && _playConfirmModalVisible;
   var activeTint = confirmActive
@@ -1134,9 +1276,10 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    || _lastAppliedAttentionState != attentionActive
    || _lastAppliedConfirmState != confirmActive;
 
-  var shouldApplyVisualTint = stateChanged;
+  var shouldApplyVisualTint = forceApply || stateChanged;
   if (!shouldApplyVisualTint
    && attentionActive
+    && allowDriftCheck
    && IsPlayButtonTintDrifted(activeTint, activeOutlineTint, activeLabelTint))
   {
    shouldApplyVisualTint = true;
@@ -1298,11 +1441,67 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   _playSelectableTarget = nextSelectableTarget;
   _lastTintTargetRoot = root;
 
+    RebindPlayPointerEventRelay(nextSelectableTarget);
+    if (changed)
+    {
+     RequestTintRefresh();
+    }
+
   if (changed)
   {
    TracePlayTargets(root, nextTintTarget, nextOutlineTarget, nextLabelTarget, nextSelectableTarget);
   }
  }
+
+   private void RebindPlayPointerEventRelay(Component? target)
+   {
+    if (ReferenceEquals(_playPointerRelayTarget, target) && _playPointerEventRelay is not null)
+    {
+     return;
+    }
+
+    ClearPlayPointerEventRelay();
+    if (target is null)
+    {
+     return;
+    }
+
+    _playPointerRelayTarget = target;
+    _playPointerEventRelay = target.GetComponent<PlayPointerEventRelay>();
+    if (_playPointerEventRelay is null)
+    {
+     _playPointerEventRelay = target.gameObject.AddComponent<PlayPointerEventRelay>();
+    }
+
+    _playPointerHovering = false;
+    _playPointerEventRelay.OnHoverChanged = OnPlayPointerHoverChanged;
+    _playPointerEventRelay.OnStateChanged = OnPlayPointerStateChanged;
+   }
+
+   private void ClearPlayPointerEventRelay()
+   {
+    if (_playPointerEventRelay is not null)
+    {
+     _playPointerEventRelay.OnHoverChanged = null;
+     _playPointerEventRelay.OnStateChanged = null;
+     Destroy(_playPointerEventRelay);
+    }
+
+    _playPointerHovering = false;
+    _playPointerEventRelay = null;
+    _playPointerRelayTarget = null;
+   }
+
+     private void OnPlayPointerHoverChanged(bool isHovering)
+     {
+    _playPointerHovering = isHovering;
+    RequestTintRefresh();
+     }
+
+   private void OnPlayPointerStateChanged()
+   {
+    RequestTintRefresh();
+   }
 
  private void TracePlayAnchorIfChanged(Transform playAnchor)
  {
@@ -1487,7 +1686,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   if (!_songSelectionActive)
   {
    _displayText = null;
-   _lastLevelId = string.Empty;
+    _lastLookupSnapshotKey = string.Empty;
    _lastDataRevision = -1;
    return;
   }
@@ -1496,7 +1695,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    if (level is null)
    {
     _displayText = null;
-    _lastLevelId = string.Empty;
+      _lastLookupSnapshotKey = string.Empty;
     return;
    }
 
@@ -1504,15 +1703,15 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    if (snapshot is null || string.IsNullOrWhiteSpace(snapshot.LevelId))
    {
     _displayText = null;
-    _lastLevelId = string.Empty;
+     _lastLookupSnapshotKey = string.Empty;
     _lastDataRevision = -1;
     return;
    }
 
+    var snapshotCacheKey = BuildSnapshotCacheKey(snapshot);
    var dataRevision = _runtime!.GetDataRevision();
 
-   if (string.Equals(_lastLevelId, snapshot.LevelId, StringComparison.OrdinalIgnoreCase)
-      && !string.IsNullOrWhiteSpace(_displayText)
+    if (string.Equals(_lastLookupSnapshotKey, snapshotCacheKey, StringComparison.Ordinal)
       && _lastDataRevision == dataRevision)
    {
     return;
@@ -1525,18 +1724,20 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   if (!_songSelectionActive)
   {
    _displayText = null;
-   _lastLevelId = string.Empty;
+    _lastLookupSnapshotKey = string.Empty;
    _lastDataRevision = -1;
    return;
   }
 
    _displayText = text;
-   _lastLevelId = snapshot.LevelId ?? string.Empty;
+    _lastLookupSnapshotKey = snapshotCacheKey;
    _lastDataRevision = dataRevision;
   }
   catch
   {
    _displayText = null;
+    _lastLookupSnapshotKey = string.Empty;
+    _lastDataRevision = -1;
   }
   finally
   {
@@ -1786,6 +1987,32 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
    {
     continue;
    }
+
+     if (HasSelectableColors(component) && HasOnClickEvent(component))
+     {
+      return component;
+     }
+    }
+
+    foreach (var component in root.GetComponentsInChildren<Component>(true))
+    {
+     if (component is null)
+     {
+      continue;
+     }
+
+     if (HasSelectableColors(component) && HasOnClickEvent(component))
+     {
+      return component;
+     }
+    }
+
+    foreach (var component in root.GetComponents<Component>())
+    {
+     if (component is null)
+     {
+      continue;
+     }
 
    if (HasSelectableColors(component))
    {
@@ -2148,6 +2375,19 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
   };
  }
 
+ private static string BuildSnapshotCacheKey(SongSelectionSnapshot snapshot)
+ {
+  return string.Join("|", new[]
+  {
+   snapshot.LevelId?.Trim() ?? string.Empty,
+   snapshot.BsrId?.Trim() ?? string.Empty,
+   snapshot.SongName?.Trim() ?? string.Empty,
+   snapshot.SongSubName?.Trim() ?? string.Empty,
+   snapshot.SongAuthorName?.Trim() ?? string.Empty,
+   snapshot.LevelAuthorName?.Trim() ?? string.Empty,
+  });
+ }
+
  private static string? TryReadStringMember(Type type, object instance, string memberName)
  {
   for (var cursor = type; cursor is not null; cursor = cursor.BaseType)
@@ -2328,6 +2568,9 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
   TintColorField(ref tinted, colorBlockType, "highlightedColor", tint);
   TintColorField(ref tinted, colorBlockType, "pressedColor", tint);
   TintColorField(ref tinted, colorBlockType, "selectedColor", tint);
+  TintColorField(ref tinted, colorBlockType, "disabledColor", tint);
+    SetFloatField(ref tinted, colorBlockType, "colorMultiplier", 1f);
+  SetFloatField(ref tinted, colorBlockType, "fadeDuration", 0f);
 
   return tinted;
  }
@@ -2343,6 +2586,17 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
   var original = (Color)field.GetValue(boxedStruct);
     var next = new Color(tint.r, tint.g, tint.b, tint.a);
   field.SetValue(boxedStruct, next);
+ }
+
+ private static void SetFloatField(ref object boxedStruct, Type type, string fieldName, float value)
+ {
+  var field = type.GetField(fieldName, InstanceFlags);
+  if (field?.FieldType != typeof(float))
+  {
+   return;
+  }
+
+  field.SetValue(boxedStruct, value);
  }
 
  private static readonly string[] ColorMemberNames =
@@ -2508,22 +2762,38 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
 
  private Color GetAttentionDisplayColor()
  {
-  return ParseRuntimeColor(_runtime?.GetAttentionDisplayColorHex(), DefaultAttentionDisplayColor);
+  return GetCachedRuntimeColor(
+   _runtime?.GetAttentionDisplayColorHex(),
+   DefaultAttentionDisplayColor,
+   ref _cachedAttentionDisplayColorHex,
+   ref _cachedAttentionDisplayColor);
  }
 
  private Color GetPlayButtonAttentionColor()
  {
-  return ParseRuntimeColor(_runtime?.GetPlayButtonAttentionColorHex(), DefaultPlayButtonAttentionColor);
+  return GetCachedRuntimeColor(
+   _runtime?.GetPlayButtonAttentionColorHex(),
+   DefaultPlayButtonAttentionColor,
+   ref _cachedPlayButtonAttentionColorHex,
+   ref _cachedPlayButtonAttentionColor);
  }
 
  private Color GetPlayButtonAttentionTextColor()
  {
-  return ParseRuntimeColor(_runtime?.GetPlayButtonAttentionTextColorHex(), DefaultPlayButtonAttentionTextColor);
+  return GetCachedRuntimeColor(
+   _runtime?.GetPlayButtonAttentionTextColorHex(),
+   DefaultPlayButtonAttentionTextColor,
+   ref _cachedPlayButtonAttentionTextColorHex,
+   ref _cachedPlayButtonAttentionTextColor);
  }
 
  private Color GetPlayButtonConfirmColor()
  {
-  return ParseRuntimeColor(_runtime?.GetPlayButtonConfirmColorHex(), DefaultPlayButtonConfirmColor);
+  return GetCachedRuntimeColor(
+   _runtime?.GetPlayButtonConfirmColorHex(),
+   DefaultPlayButtonConfirmColor,
+   ref _cachedPlayButtonConfirmColorHex,
+   ref _cachedPlayButtonConfirmColor);
  }
 
  private string GetPlayButtonConfirmText()
@@ -2535,6 +2805,21 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
  private int GetPlayButtonConfirmDurationSeconds()
  {
   return Math.Max(0, _runtime?.GetPlayButtonConfirmDurationSeconds() ?? 6);
+ }
+
+ private Color GetCachedRuntimeColor(string? rawHex, Color fallback, ref string cachedHex, ref Color cachedColor)
+ {
+  var normalized = string.IsNullOrWhiteSpace(rawHex)
+   ? string.Empty
+   : rawHex!.Trim();
+  if (string.Equals(normalized, cachedHex, StringComparison.OrdinalIgnoreCase))
+  {
+   return cachedColor;
+  }
+
+  cachedHex = normalized;
+  cachedColor = ParseRuntimeColor(normalized, fallback);
+  return cachedColor;
  }
 
  private static Color ParseRuntimeColor(string? rawHex, Color fallback)
@@ -2600,6 +2885,8 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
    SceneManager.activeSceneChanged -= OnActiveSceneChanged;
    _sceneHooksInstalled = false;
   }
+
+    Application.onBeforeRender -= OnBeforeRender;
 
   ClearMenuControllerEventSubscriptions();
   ClearGameTransitionHook();
