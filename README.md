@@ -1,6 +1,7 @@
 # UNBS-Attention; USAGI.NETWORK BeatSaber Attention
 
-Beat Saber 向けの〝⚠️アテンション情報〟を表示するプラグインです。
+Beat Saber 向けの 〝⚠️アテンション情報〟 を表示するプラグインです。
+プレイヤーが各マップに対して、自分用の注意メモや視認性の高い補足情報を表示できます。
 
 > ！！使用上の注意！！
 >
