@@ -31,9 +31,9 @@ internal sealed class AhoCorasickMatcher
 
  public bool IsEmpty => _nodes.Length <= 1;
 
- public void CollectMatches(string? input, Action<int> onMatch)
+ public void CollectMatches(string? input, IReadOnlyList<int[]> payloadsByPatternIndex, HashSet<int> sink)
  {
-  if (string.IsNullOrWhiteSpace(input) || IsEmpty)
+  if (string.IsNullOrWhiteSpace(input) || IsEmpty || payloadsByPatternIndex.Count == 0)
   {
    return;
   }
@@ -56,7 +56,17 @@ internal sealed class AhoCorasickMatcher
    var outputs = _nodes[state].Outputs;
    for (var i = 0; i < outputs.Count; i++)
    {
-    onMatch(outputs[i]);
+    var patternIndex = outputs[i];
+    if ((uint)patternIndex >= (uint)payloadsByPatternIndex.Count)
+    {
+     continue;
+    }
+
+    var payloadIds = payloadsByPatternIndex[patternIndex];
+    for (var j = 0; j < payloadIds.Length; j++)
+    {
+     sink.Add(payloadIds[j]);
+    }
    }
   }
  }

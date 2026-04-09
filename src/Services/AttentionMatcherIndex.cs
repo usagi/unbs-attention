@@ -371,15 +371,7 @@ internal sealed class AttentionMatcherIndex
    return;
   }
 
-  matcher.CollectMatches(input, patternIndex =>
-  {
-   if (patternIndex < 0 || patternIndex >= payloadsByPatternIndex.Count)
-   {
-    return;
-   }
-
-   AddPayloadReferences(sink, payloadsByPatternIndex[patternIndex]);
-  });
+  matcher.CollectMatches(input, payloadsByPatternIndex, sink);
  }
 
  private static void CollectRegexMatches(IReadOnlyList<RegexRule> rules, string? input, HashSet<int> sink)

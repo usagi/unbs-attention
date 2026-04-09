@@ -2,12 +2,17 @@ using UnbsAttention.Config;
 using UnbsAttention.Models;
 using UnbsAttention.Presentation;
 using UnbsAttention.Services;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace UnbsAttention;
 
 public sealed class AttentionPluginRuntime
 {
+ private static readonly Regex CustomLevelHashRegex = new(
+  "custom_level_([a-fA-F0-9]{40})",
+  RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
  private PluginConfig _config = new();
  private AttentionStore _store = null!;
  private AttentionDatabase _localDatabase = null!;
@@ -149,7 +154,19 @@ public sealed class AttentionPluginRuntime
   var matches = _matcherIndex.FindMatches(context, excludedCategories);
   if (matches.Count > 0)
   {
-   result = string.Join("\n", matches.Select(x => AttentionLineFormatter.Format(x.Category, x.Reason, _config.DisplayMode, _config.CategoryPrefixes)));
+   var builder = new StringBuilder(matches.Count * 24);
+   for (var i = 0; i < matches.Count; i++)
+   {
+    if (i > 0)
+    {
+     builder.Append('\n');
+    }
+
+    var match = matches[i];
+    builder.Append(AttentionLineFormatter.Format(match.Category, match.Reason, _config.DisplayMode, _config.CategoryPrefixes));
+   }
+
+   result = builder.ToString();
   }
 
   // 判定処理の最後で期限切れを掃除する（アクセス時のTTL延長は維持）。
@@ -921,24 +938,44 @@ public sealed class AttentionPluginRuntime
     return;
    }
 
-   var expiredKeys = _descriptionCache
-    .Where(x => x.Value.ExpiresAtUtc <= now)
-    .Select(x => x.Key)
-    .ToList();
-
-   foreach (var expiredKey in expiredKeys)
+   List<string>? expiredKeys = null;
+   foreach (var pair in _descriptionCache)
    {
-    _descriptionCache.Remove(expiredKey);
+    if (pair.Value.ExpiresAtUtc > now)
+    {
+     continue;
+    }
+
+    expiredKeys ??= new List<string>();
+    expiredKeys.Add(pair.Key);
    }
 
-   var expiredBsrKeys = _bsrByHashCache
-    .Where(x => x.Value.ExpiresAtUtc <= now)
-    .Select(x => x.Key)
-    .ToList();
-
-   foreach (var expiredBsrKey in expiredBsrKeys)
+   if (expiredKeys is not null)
    {
-    _bsrByHashCache.Remove(expiredBsrKey);
+    foreach (var expiredKey in expiredKeys)
+    {
+     _descriptionCache.Remove(expiredKey);
+    }
+   }
+
+   List<string>? expiredBsrKeys = null;
+   foreach (var pair in _bsrByHashCache)
+   {
+    if (pair.Value.ExpiresAtUtc > now)
+    {
+     continue;
+    }
+
+    expiredBsrKeys ??= new List<string>();
+    expiredBsrKeys.Add(pair.Key);
+   }
+
+   if (expiredBsrKeys is not null)
+   {
+    foreach (var expiredBsrKey in expiredBsrKeys)
+    {
+     _bsrByHashCache.Remove(expiredBsrKey);
+    }
    }
 
    _lastDescriptionCacheCleanupUtc = now;
@@ -952,7 +989,7 @@ public sealed class AttentionPluginRuntime
    return null;
   }
 
-  var match = Regex.Match(levelId, "custom_level_([a-fA-F0-9]{40})", RegexOptions.IgnoreCase);
+  var match = CustomLevelHashRegex.Match(levelId);
   return match.Success ? match.Groups[1].Value : null;
  }
 
