@@ -20,6 +20,14 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private const float VisualMaintenanceIntervalSeconds = 0.15f;
  private const float TintMaintenanceIntervalSeconds = 0.1f;
  private const float TintDriftBoostSeconds = 0.35f;
+ private const float ForceTintPassDurationSeconds = 0.6f;
+
+ private static readonly object ReflectionCacheLock = new();
+ private static readonly Dictionary<Type, List<ColorMemberAccessor>> ColorMemberAccessorCache = new();
+ private static readonly Dictionary<Type, SelectableColorsAccessor?> SelectableColorsAccessorCache = new();
+ private static readonly Dictionary<Type, ColorBlockFieldAccessor> ColorBlockFieldAccessorCache = new();
+ private static readonly Dictionary<Type, MethodInfo?> AddListenerMethodCache = new();
+ private static readonly Dictionary<Type, MethodInfo?> ZeroArgInvokeMethodCache = new();
 
  private sealed class EventSubscription
  {
@@ -30,6 +38,41 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   public FieldInfo? DelegateField { get; set; }
 
   public Delegate Handler { get; set; } = null!;
+ }
+
+ private sealed class ColorMemberAccessor
+ {
+  public PropertyInfo? Property { get; set; }
+
+  public FieldInfo? Field { get; set; }
+ }
+
+ private sealed class SelectableColorsAccessor
+ {
+  public Type ColorsType { get; set; } = null!;
+
+  public PropertyInfo? ReadProperty { get; set; }
+
+  public PropertyInfo? WriteProperty { get; set; }
+
+  public FieldInfo? Field { get; set; }
+ }
+
+ private sealed class ColorBlockFieldAccessor
+ {
+  public FieldInfo? NormalColor { get; set; }
+
+  public FieldInfo? HighlightedColor { get; set; }
+
+  public FieldInfo? PressedColor { get; set; }
+
+  public FieldInfo? SelectedColor { get; set; }
+
+  public FieldInfo? DisabledColor { get; set; }
+
+  public FieldInfo? ColorMultiplier { get; set; }
+
+  public FieldInfo? FadeDuration { get; set; }
  }
 
  private sealed class PlayPointerEventRelay : MonoBehaviour,
@@ -77,13 +120,21 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private float _nextVisualMaintenanceAt = float.MinValue;
  private float _nextTintMaintenanceAt = float.MinValue;
  private float _tintDriftBoostUntil = float.MinValue;
+ private float _forceTintPassUntil = float.MinValue;
  private bool _refreshInFlight;
  private string? _displayText;
  private string _lastAppliedDisplayText = string.Empty;
  private Color _lastAppliedDisplayColor = Color.clear;
  private bool _hasAppliedDisplayStyle;
- private string _lastLookupSnapshotKey = string.Empty;
+ private string? _lastSnapshotLevelId;
+ private string? _lastSnapshotBsrId;
+ private string? _lastSnapshotSongName;
+ private string? _lastSnapshotSongSubName;
+ private string? _lastSnapshotSongAuthorName;
+ private string? _lastSnapshotLevelAuthorName;
  private MonoBehaviour? _cachedDetailController;
+ private MonoBehaviour? _cachedGameScenesManager;
+ private readonly Dictionary<string, Component?> _componentCacheByTypeName = new(StringComparer.Ordinal);
  private GameObject? _curvedTextObject;
  private Component? _curvedTextComponent;
  private Transform? _currentSurfaceRoot;
@@ -225,7 +276,10 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    return;
   }
 
-  UpdatePlayButtonTint(attentionActive, true, forceApply: true);
+  if (Time.unscaledTime <= _forceTintPassUntil)
+  {
+   UpdatePlayButtonTint(attentionActive, true, forceApply: true);
+  }
  }
 
  private void OnBeforeRender()
@@ -241,7 +295,8 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    return;
   }
 
-  UpdatePlayButtonTint(attentionActive, true, forceApply: true);
+  var forceApply = Time.unscaledTime <= _forceTintPassUntil;
+  UpdatePlayButtonTint(attentionActive, true, forceApply);
  }
 
  private void InstallSceneHooksIfNeeded()
@@ -269,6 +324,8 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   ClearMenuControllerEventSubscriptions();
   ClearGameTransitionHook();
   ClearPlayPointerEventRelay();
+    _componentCacheByTypeName.Clear();
+    _cachedGameScenesManager = null;
   _cachedDetailController = null;
 
   if (_songSelectionActive)
@@ -290,8 +347,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    return;
   }
 
-  var manager = Resources.FindObjectsOfTypeAll<MonoBehaviour>()
-   .FirstOrDefault(x => x is not null && string.Equals(x.GetType().Name, "GameScenesManager", StringComparison.Ordinal));
+  var manager = ResolveGameScenesManager();
   if (manager is null)
   {
    return;
@@ -310,6 +366,32 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
 
   _gameTransitionSubscription = subscription;
  }
+
+   private MonoBehaviour? ResolveGameScenesManager()
+   {
+    if (_cachedGameScenesManager is not null)
+    {
+     return _cachedGameScenesManager;
+    }
+
+    foreach (var monoBehaviour in Resources.FindObjectsOfTypeAll<MonoBehaviour>())
+    {
+     if (monoBehaviour is null)
+     {
+      continue;
+     }
+
+     if (!string.Equals(monoBehaviour.GetType().Name, "GameScenesManager", StringComparison.Ordinal))
+     {
+      continue;
+     }
+
+     _cachedGameScenesManager = monoBehaviour;
+     return monoBehaviour;
+    }
+
+    return null;
+   }
 
  private void OnGameTransitionDidFinish(object sceneTransitionType, object transitionSetupData, object diContainer)
  {
@@ -331,13 +413,13 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   boundAny |= TryBindMenuControllerEvent(_cachedDetailController, "didDeactivateEvent", nameof(OnDetailDidDeactivate));
   boundAny |= TryBindMenuControllerEvent(_cachedDetailController, "didChangeDifficultyBeatmapEvent", nameof(OnMenuSelectionChangedOneArg));
 
-  var levelCollectionController = FindComponentByTypeName("LevelCollectionViewController");
+  var levelCollectionController = FindComponentByTypeNameCached("LevelCollectionViewController");
   if (levelCollectionController is not null)
   {
    boundAny |= TryBindMenuControllerEvent(levelCollectionController, "didSelectLevelEvent", nameof(OnMenuSelectionChangedTwoArgs));
   }
 
-  var characteristicController = FindComponentByTypeName("BeatmapCharacteristicSegmentedControlController");
+  var characteristicController = FindComponentByTypeNameCached("BeatmapCharacteristicSegmentedControlController");
   if (characteristicController is not null)
   {
    boundAny |= TryBindMenuControllerEvent(characteristicController, "didSelectBeatmapCharacteristicEvent", nameof(OnMenuSelectionChangedTwoArgs));
@@ -361,6 +443,21 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   }
 
   RequestAttachAndRefresh();
+ }
+
+ private Component? FindComponentByTypeNameCached(string typeName)
+ {
+  if (_componentCacheByTypeName.TryGetValue(typeName, out var cached) && cached is not null)
+  {
+    if (cached is not Behaviour behaviour || behaviour.isActiveAndEnabled)
+   {
+    return cached;
+   }
+  }
+
+  var resolved = FindComponentByTypeName(typeName);
+  _componentCacheByTypeName[typeName] = resolved;
+  return resolved;
  }
 
  private static Component? FindComponentByTypeName(string typeName)
@@ -581,6 +678,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   Interlocked.Exchange(ref _pendingTintRefreshRequest, 1);
   _nextVisualMaintenanceAt = float.MinValue;
   _nextTintMaintenanceAt = float.MinValue;
+  ArmForceTintPassWindow();
  }
 
  private void RequestTintRefresh()
@@ -588,6 +686,12 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   Interlocked.Exchange(ref _pendingTintRefreshRequest, 1);
   _nextTintMaintenanceAt = float.MinValue;
   _tintDriftBoostUntil = Mathf.Max(_tintDriftBoostUntil, Time.unscaledTime + TintDriftBoostSeconds);
+  ArmForceTintPassWindow();
+ }
+
+ private void ArmForceTintPassWindow()
+ {
+  _forceTintPassUntil = Mathf.Max(_forceTintPassUntil, Time.unscaledTime + ForceTintPassDurationSeconds);
  }
 
    private void OnSongSelectionActivated()
@@ -595,11 +699,12 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
       _displayText = null;
       _lastAppliedDisplayText = string.Empty;
       _hasAppliedDisplayStyle = false;
-    _lastLookupSnapshotKey = string.Empty;
+    ClearSnapshotCache();
     _lastDataRevision = -1;
     _nextVisualMaintenanceAt = float.MinValue;
     _nextTintMaintenanceAt = float.MinValue;
     _tintDriftBoostUntil = float.MinValue;
+    _forceTintPassUntil = float.MinValue;
     _playPointerHovering = false;
     RequestAttachAndRefresh();
     LogInfo("[UNBS] Song selection activated.");
@@ -610,16 +715,18 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
     _displayText = null;
     _lastAppliedDisplayText = string.Empty;
     _hasAppliedDisplayStyle = false;
-    _lastLookupSnapshotKey = string.Empty;
+      ClearSnapshotCache();
     _lastDataRevision = -1;
     _nextVisualMaintenanceAt = float.MinValue;
     _nextTintMaintenanceAt = float.MinValue;
     _tintDriftBoostUntil = float.MinValue;
+      _forceTintPassUntil = float.MinValue;
     _playPointerHovering = false;
     Interlocked.Exchange(ref _pendingAttachRequest, 0);
     Interlocked.Exchange(ref _pendingRefreshRequest, 0);
     Interlocked.Exchange(ref _pendingTintRefreshRequest, 0);
     _cachedDetailController = null;
+      _componentCacheByTypeName.Clear();
 
     if (_curvedTextObject is not null)
     {
@@ -889,13 +996,8 @@ private void ApplyDisplayToCurvedText(bool runVisualMaintenance, bool runTintMai
    return false;
   }
 
-  var addListener = interceptEvent.GetType()
-   .GetMethods(InstanceFlags)
-   .FirstOrDefault(x =>
-    string.Equals(x.Name, "AddListener", StringComparison.Ordinal)
-    && x.GetParameters().Length == 1
-    && typeof(Delegate).IsAssignableFrom(x.GetParameters()[0].ParameterType));
-  var listenerType = addListener?.GetParameters().FirstOrDefault()?.ParameterType;
+  var addListener = GetAddListenerMethod(interceptEvent.GetType());
+  var listenerType = addListener?.GetParameters()[0].ParameterType;
   var handler = GetType().GetMethod(nameof(OnInterceptedPlayClicked), InstanceFlags);
   if (addListener is null || listenerType is null || handler is null)
   {
@@ -1008,9 +1110,7 @@ private void ApplyDisplayToCurvedText(bool runVisualMaintenance, bool runTintMai
 
  private static bool TryInvokeEventObject(object evt)
  {
-  var invoke = evt.GetType()
-   .GetMethods(InstanceFlags)
-   .FirstOrDefault(x => string.Equals(x.Name, "Invoke", StringComparison.Ordinal) && x.GetParameters().Length == 0);
+  var invoke = GetZeroArgInvokeMethod(evt.GetType());
   if (invoke is null)
   {
    return false;
@@ -1018,6 +1118,74 @@ private void ApplyDisplayToCurvedText(bool runVisualMaintenance, bool runTintMai
 
   invoke.Invoke(evt, null);
   return true;
+ }
+
+ private static MethodInfo? GetAddListenerMethod(Type eventType)
+ {
+  lock (ReflectionCacheLock)
+  {
+   if (AddListenerMethodCache.TryGetValue(eventType, out var cached))
+   {
+    return cached;
+   }
+
+   MethodInfo? resolved = null;
+   foreach (var method in eventType.GetMethods(InstanceFlags))
+   {
+    if (!string.Equals(method.Name, "AddListener", StringComparison.Ordinal))
+    {
+     continue;
+    }
+
+    var parameters = method.GetParameters();
+    if (parameters.Length != 1)
+    {
+     continue;
+    }
+
+    if (!typeof(Delegate).IsAssignableFrom(parameters[0].ParameterType))
+    {
+     continue;
+    }
+
+    resolved = method;
+    break;
+   }
+
+   AddListenerMethodCache[eventType] = resolved;
+   return resolved;
+  }
+ }
+
+ private static MethodInfo? GetZeroArgInvokeMethod(Type eventType)
+ {
+  lock (ReflectionCacheLock)
+  {
+   if (ZeroArgInvokeMethodCache.TryGetValue(eventType, out var cached))
+   {
+    return cached;
+   }
+
+   MethodInfo? resolved = null;
+   foreach (var method in eventType.GetMethods(InstanceFlags))
+   {
+    if (!string.Equals(method.Name, "Invoke", StringComparison.Ordinal))
+    {
+     continue;
+    }
+
+    if (method.GetParameters().Length != 0)
+    {
+     continue;
+    }
+
+    resolved = method;
+    break;
+   }
+
+   ZeroArgInvokeMethodCache[eventType] = resolved;
+   return resolved;
+  }
  }
 
  private void RestorePlayClickIntercept()
@@ -1575,14 +1743,24 @@ private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bo
   LogInfo("[UNBS] Label target=" + DescribeComponent(labelTarget));
   LogInfo("[UNBS] Selectable target=" + DescribeComponent(selectableTarget));
 
-  var candidates = root.GetComponentsInChildren<Component>(true)
-   .Where(x => x is not null)
-   .Where(x => HasColorMember(x) || HasSelectableColors(x))
-   .ToList();
+  var candidates = new List<Component>();
+  foreach (var component in root.GetComponentsInChildren<Component>(true))
+  {
+   if (component is null)
+   {
+    continue;
+   }
+
+   if (HasColorMember(component) || HasSelectableColors(component))
+   {
+    candidates.Add(component);
+   }
+  }
 
   LogInfo("[UNBS] Color candidate count=" + candidates.Count);
-  foreach (var component in candidates.Take(60))
+  for (var i = 0; i < candidates.Count && i < 60; i++)
   {
+   var component = candidates[i];
    var info = DescribeComponent(component);
    var colorText = TryGetColorFromComponent(component, out var c)
     ? $" color=({c.r:F2},{c.g:F2},{c.b:F2},{c.a:F2})"
@@ -1659,10 +1837,9 @@ private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bo
 
  private static string DescribeSelectableColors(object colors)
  {
-  var type = colors.GetType();
-  Color Read(string fieldName)
+  var fields = GetColorBlockFieldAccessor(colors.GetType());
+  Color Read(FieldInfo? field)
   {
-   var field = type.GetField(fieldName, InstanceFlags);
    if (field?.FieldType != typeof(Color))
    {
     return default;
@@ -1671,10 +1848,10 @@ private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bo
    return (Color)field.GetValue(colors);
   }
 
-  var n = Read("normalColor");
-  var h = Read("highlightedColor");
-  var p = Read("pressedColor");
-  var s = Read("selectedColor");
+  var n = Read(fields.NormalColor);
+  var h = Read(fields.HighlightedColor);
+  var p = Read(fields.PressedColor);
+  var s = Read(fields.SelectedColor);
   return $"N({n.r:F2},{n.g:F2},{n.b:F2},{n.a:F2}) H({h.r:F2},{h.g:F2},{h.b:F2},{h.a:F2}) P({p.r:F2},{p.g:F2},{p.b:F2},{p.a:F2}) S({s.r:F2},{s.g:F2},{s.b:F2},{s.a:F2})";
  }
 
@@ -1686,7 +1863,7 @@ private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bo
   if (!_songSelectionActive)
   {
    _displayText = null;
-    _lastLookupSnapshotKey = string.Empty;
+     ClearSnapshotCache();
    _lastDataRevision = -1;
    return;
   }
@@ -1695,7 +1872,7 @@ private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bo
    if (level is null)
    {
     _displayText = null;
-      _lastLookupSnapshotKey = string.Empty;
+    ClearSnapshotCache();
     return;
    }
 
@@ -1703,15 +1880,14 @@ private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bo
    if (snapshot is null || string.IsNullOrWhiteSpace(snapshot.LevelId))
    {
     _displayText = null;
-     _lastLookupSnapshotKey = string.Empty;
+    ClearSnapshotCache();
     _lastDataRevision = -1;
     return;
    }
 
-    var snapshotCacheKey = BuildSnapshotCacheKey(snapshot);
    var dataRevision = _runtime!.GetDataRevision();
 
-    if (string.Equals(_lastLookupSnapshotKey, snapshotCacheKey, StringComparison.Ordinal)
+    if (IsSnapshotEquivalent(snapshot)
       && _lastDataRevision == dataRevision)
    {
     return;
@@ -1724,19 +1900,19 @@ private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bo
   if (!_songSelectionActive)
   {
    _displayText = null;
-    _lastLookupSnapshotKey = string.Empty;
+   ClearSnapshotCache();
    _lastDataRevision = -1;
    return;
   }
 
    _displayText = text;
-    _lastLookupSnapshotKey = snapshotCacheKey;
+   RememberSnapshot(snapshot);
    _lastDataRevision = dataRevision;
   }
   catch
   {
    _displayText = null;
-    _lastLookupSnapshotKey = string.Empty;
+   ClearSnapshotCache();
     _lastDataRevision = -1;
   }
   finally
@@ -1922,58 +2098,60 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
   return field?.FieldType == typeof(string);
  }
 
-   private static Component? FindTintTarget(Transform root)
+ private static Component? FindTintTarget(Transform root)
+ {
+  foreach (var component in root.GetComponents<Component>())
+  {
+   if (component is null)
    {
-    foreach (var component in root.GetComponents<Component>())
-    {
-     if (component is null)
-     {
     continue;
-     }
-
-     var typeName = component.GetType().Name;
-       if ((typeName.IndexOf("Image", StringComparison.OrdinalIgnoreCase) >= 0
-         || typeName.IndexOf("Graphic", StringComparison.OrdinalIgnoreCase) >= 0)
-       && HasColorMember(component))
-     {
-    return component;
-     }
-    }
-
-    foreach (var component in root.GetComponentsInChildren<Component>(true))
-    {
-     if (component is null)
-     {
-    continue;
-     }
-
-     var typeName = component.GetType().Name;
-       if ((typeName.IndexOf("Image", StringComparison.OrdinalIgnoreCase) >= 0
-         || typeName.IndexOf("Graphic", StringComparison.OrdinalIgnoreCase) >= 0)
-       && HasColorMember(component))
-     {
-    return component;
-     }
-    }
-
-    return null;
    }
+
+   var typeName = component.GetType().Name;
+   if ((typeName.IndexOf("Image", StringComparison.OrdinalIgnoreCase) >= 0
+     || typeName.IndexOf("Graphic", StringComparison.OrdinalIgnoreCase) >= 0)
+    && HasColorMember(component))
+   {
+    return component;
+   }
+  }
+
+  foreach (var component in root.GetComponentsInChildren<Component>(true))
+  {
+   if (component is null)
+   {
+    continue;
+   }
+
+   var typeName = component.GetType().Name;
+   if ((typeName.IndexOf("Image", StringComparison.OrdinalIgnoreCase) >= 0
+     || typeName.IndexOf("Graphic", StringComparison.OrdinalIgnoreCase) >= 0)
+    && HasColorMember(component))
+   {
+    return component;
+   }
+  }
+
+  return null;
+ }
 
  private static Component? FindOutlineTintTarget(Transform root)
  {
-  var preferred = root.GetComponentsInChildren<Component>(true)
-   .Where(x => x is not null)
-   .FirstOrDefault(x =>
-   {
-    var name = x.transform.name;
-    return (name.IndexOf("Underline", StringComparison.OrdinalIgnoreCase) >= 0
-      || name.IndexOf("Outline", StringComparison.OrdinalIgnoreCase) >= 0
-      || name.IndexOf("Border", StringComparison.OrdinalIgnoreCase) >= 0)
-     && HasColorMember(x);
-   });
-  if (preferred is not null)
+  foreach (var component in root.GetComponentsInChildren<Component>(true))
   {
-   return preferred;
+   if (component is null)
+   {
+    continue;
+   }
+
+   var name = component.transform.name;
+   var looksLikeOutline = name.IndexOf("Underline", StringComparison.OrdinalIgnoreCase) >= 0
+    || name.IndexOf("Outline", StringComparison.OrdinalIgnoreCase) >= 0
+    || name.IndexOf("Border", StringComparison.OrdinalIgnoreCase) >= 0;
+   if (looksLikeOutline && HasColorMember(component))
+   {
+    return component;
+   }
   }
 
   return null;
@@ -1988,31 +2166,31 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
     continue;
    }
 
-     if (HasSelectableColors(component) && HasOnClickEvent(component))
-     {
-      return component;
-     }
-    }
+   if (HasSelectableColors(component) && HasOnClickEvent(component))
+   {
+    return component;
+   }
+  }
 
-    foreach (var component in root.GetComponentsInChildren<Component>(true))
-    {
-     if (component is null)
-     {
-      continue;
-     }
+  foreach (var component in root.GetComponentsInChildren<Component>(true))
+  {
+   if (component is null)
+   {
+    continue;
+   }
 
-     if (HasSelectableColors(component) && HasOnClickEvent(component))
-     {
-      return component;
-     }
-    }
+   if (HasSelectableColors(component) && HasOnClickEvent(component))
+   {
+    return component;
+   }
+  }
 
-    foreach (var component in root.GetComponents<Component>())
-    {
-     if (component is null)
-     {
-      continue;
-     }
+  foreach (var component in root.GetComponents<Component>())
+  {
+   if (component is null)
+   {
+    continue;
+   }
 
    if (HasSelectableColors(component))
    {
@@ -2038,79 +2216,52 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
 
  private static Component? FindPlayLabelTintTarget(Transform root)
  {
-  var preferred = root.GetComponentsInChildren<Component>(true)
-   .Where(x => x is not null)
-   .FirstOrDefault(x =>
-   {
-    var typeName = x.GetType().Name;
-    if (typeName.IndexOf("Text", StringComparison.OrdinalIgnoreCase) < 0)
-    {
-     return false;
-    }
-
-    return HasColorMember(x);
-   });
-
-  if (preferred is not null)
+  foreach (var component in root.GetComponentsInChildren<Component>(true))
   {
-   return preferred;
+   if (component is null)
+   {
+    continue;
+   }
+
+   var typeName = component.GetType().Name;
+   if (typeName.IndexOf("Text", StringComparison.OrdinalIgnoreCase) < 0)
+   {
+    continue;
+   }
+
+   if (HasColorMember(component))
+   {
+    return component;
+   }
   }
 
   return null;
  }
 
-   private static bool HasColorMember(Component component)
-   {
-  return TryGetColorMember(component, out _);
-   }
+ private static bool HasColorMember(Component component)
+ {
+  return GetColorMemberAccessors(component.GetType()).Count > 0;
+ }
 
  private static bool HasSelectableColors(Component component)
  {
-  var colorsType = GetSelectableColorsType(component);
+  var accessor = GetSelectableColorsAccessor(component.GetType());
+  var colorsType = accessor?.ColorsType;
   if (colorsType is null)
   {
    return false;
   }
 
-  return HasColorField(colorsType, "normalColor")
-   && HasColorField(colorsType, "highlightedColor")
-   && HasColorField(colorsType, "pressedColor")
-   && HasColorField(colorsType, "selectedColor");
+  var fields = GetColorBlockFieldAccessor(colorsType);
+  return fields.NormalColor is not null
+   && fields.HighlightedColor is not null
+   && fields.PressedColor is not null
+   && fields.SelectedColor is not null;
  }
 
  private static Type? GetSelectableColorsType(Component component)
  {
-  var type = component.GetType();
-  var property = type.GetProperty("colors", InstanceFlags);
-  if (property?.CanRead == true)
-  {
-   return property.PropertyType;
-  }
-
-  var field = FindSelectableColorsField(type);
-  return field?.FieldType;
- }
-
- private static FieldInfo? FindSelectableColorsField(Type type)
- {
-  for (var cursor = type; cursor is not null; cursor = cursor.BaseType)
-  {
-   var field = cursor.GetField("m_Colors", InstanceFlags)
-    ?? cursor.GetField("_colors", InstanceFlags)
-    ?? cursor.GetField("colors", InstanceFlags);
-   if (field is not null)
-   {
-    return field;
-   }
-  }
-
-  return null;
- }
-
- private static bool HasColorField(Type type, string fieldName)
- {
-  var field = type.GetField(fieldName, InstanceFlags);
-  return field?.FieldType == typeof(Color);
+  return GetSelectableColorsAccessor(component.GetType())?.ColorsType;
  }
 
  private static Transform? FindAnchorByNames(MonoBehaviour detailController, params string[] names)
@@ -2375,32 +2526,47 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
   };
  }
 
- private static string BuildSnapshotCacheKey(SongSelectionSnapshot snapshot)
+ private bool IsSnapshotEquivalent(SongSelectionSnapshot snapshot)
  {
-  return string.Join("|", new[]
-  {
-   snapshot.LevelId?.Trim() ?? string.Empty,
-   snapshot.BsrId?.Trim() ?? string.Empty,
-   snapshot.SongName?.Trim() ?? string.Empty,
-   snapshot.SongSubName?.Trim() ?? string.Empty,
-   snapshot.SongAuthorName?.Trim() ?? string.Empty,
-   snapshot.LevelAuthorName?.Trim() ?? string.Empty,
-  });
+  return string.Equals(_lastSnapshotLevelId, snapshot.LevelId, StringComparison.Ordinal)
+   && string.Equals(_lastSnapshotBsrId, snapshot.BsrId, StringComparison.Ordinal)
+   && string.Equals(_lastSnapshotSongName, snapshot.SongName, StringComparison.Ordinal)
+   && string.Equals(_lastSnapshotSongSubName, snapshot.SongSubName, StringComparison.Ordinal)
+   && string.Equals(_lastSnapshotSongAuthorName, snapshot.SongAuthorName, StringComparison.Ordinal)
+   && string.Equals(_lastSnapshotLevelAuthorName, snapshot.LevelAuthorName, StringComparison.Ordinal);
+ }
+
+ private void RememberSnapshot(SongSelectionSnapshot snapshot)
+ {
+  _lastSnapshotLevelId = snapshot.LevelId;
+  _lastSnapshotBsrId = snapshot.BsrId;
+  _lastSnapshotSongName = snapshot.SongName;
+  _lastSnapshotSongSubName = snapshot.SongSubName;
+  _lastSnapshotSongAuthorName = snapshot.SongAuthorName;
+  _lastSnapshotLevelAuthorName = snapshot.LevelAuthorName;
+ }
+
+ private void ClearSnapshotCache()
+ {
+  _lastSnapshotLevelId = null;
+  _lastSnapshotBsrId = null;
+  _lastSnapshotSongName = null;
+  _lastSnapshotSongSubName = null;
+  _lastSnapshotSongAuthorName = null;
+  _lastSnapshotLevelAuthorName = null;
  }
 
  private static string? TryReadStringMember(Type type, object instance, string memberName)
  {
   for (var cursor = type; cursor is not null; cursor = cursor.BaseType)
   {
-   var field = cursor.GetField(memberName, InstanceFlags)
-    ?? cursor.GetFields(InstanceFlags).FirstOrDefault(x => string.Equals(x.Name, memberName, StringComparison.OrdinalIgnoreCase));
+  var field = cursor.GetField(memberName, InstanceFlags) ?? FindFieldIgnoreCase(cursor, memberName);
    if (field?.FieldType == typeof(string) && field.GetValue(instance) is string fieldValue && !string.IsNullOrWhiteSpace(fieldValue))
    {
     return fieldValue;
    }
 
-   var property = cursor.GetProperty(memberName, InstanceFlags)
-    ?? cursor.GetProperties(InstanceFlags).FirstOrDefault(x => string.Equals(x.Name, memberName, StringComparison.OrdinalIgnoreCase));
+  var property = cursor.GetProperty(memberName, InstanceFlags) ?? FindPropertyIgnoreCase(cursor, memberName);
    if (property?.CanRead == true
     && property.PropertyType == typeof(string)
     && property.GetIndexParameters().Length == 0
@@ -2408,6 +2574,32 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
     && !string.IsNullOrWhiteSpace(propertyValue))
    {
     return propertyValue;
+   }
+  }
+
+  return null;
+ }
+
+ private static FieldInfo? FindFieldIgnoreCase(Type type, string memberName)
+ {
+  foreach (var field in type.GetFields(InstanceFlags))
+  {
+   if (string.Equals(field.Name, memberName, StringComparison.OrdinalIgnoreCase))
+   {
+    return field;
+   }
+  }
+
+  return null;
+ }
+
+ private static PropertyInfo? FindPropertyIgnoreCase(Type type, string memberName)
+ {
+  foreach (var property in type.GetProperties(InstanceFlags))
+  {
+   if (string.Equals(property.Name, memberName, StringComparison.OrdinalIgnoreCase))
+   {
+    return property;
    }
   }
 
@@ -2521,76 +2713,70 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
  private static bool TryGetSelectableColors(Component component, out object colors)
  {
   colors = default!;
-  var type = component.GetType();
-  var property = type.GetProperty("colors", InstanceFlags);
-  if (property?.CanRead == true)
+  var accessor = GetSelectableColorsAccessor(component.GetType());
+  if (accessor?.ReadProperty is not null)
   {
-   colors = property.GetValue(component)!;
+   colors = accessor.ReadProperty.GetValue(component)!;
    return colors is not null;
   }
 
-  var field = FindSelectableColorsField(type);
-  if (field is null)
+  if (accessor?.Field is null)
   {
    return false;
   }
 
-  colors = field.GetValue(component)!;
+  colors = accessor.Field.GetValue(component)!;
   return colors is not null;
  }
 
  private static bool TrySetSelectableColors(Component component, object colors)
  {
-  var type = component.GetType();
-  var property = type.GetProperty("colors", InstanceFlags);
-  if (property?.CanWrite == true)
+  var accessor = GetSelectableColorsAccessor(component.GetType());
+  if (accessor?.WriteProperty is not null)
   {
-   property.SetValue(component, colors);
+   accessor.WriteProperty.SetValue(component, colors);
    return true;
   }
 
-  var field = FindSelectableColorsField(type);
-  if (field is null)
+  if (accessor?.Field is null)
   {
    return false;
   }
 
-  field.SetValue(component, colors);
+  accessor.Field.SetValue(component, colors);
   return true;
  }
 
  private static object BuildTintedSelectableColors(object originalColors, Color tint)
  {
   var colorBlockType = originalColors.GetType();
+  var fields = GetColorBlockFieldAccessor(colorBlockType);
   var tinted = originalColors;
 
-  TintColorField(ref tinted, colorBlockType, "normalColor", tint);
-  TintColorField(ref tinted, colorBlockType, "highlightedColor", tint);
-  TintColorField(ref tinted, colorBlockType, "pressedColor", tint);
-  TintColorField(ref tinted, colorBlockType, "selectedColor", tint);
-  TintColorField(ref tinted, colorBlockType, "disabledColor", tint);
-    SetFloatField(ref tinted, colorBlockType, "colorMultiplier", 1f);
-  SetFloatField(ref tinted, colorBlockType, "fadeDuration", 0f);
+  TintColorField(ref tinted, fields.NormalColor, tint);
+  TintColorField(ref tinted, fields.HighlightedColor, tint);
+  TintColorField(ref tinted, fields.PressedColor, tint);
+  TintColorField(ref tinted, fields.SelectedColor, tint);
+  TintColorField(ref tinted, fields.DisabledColor, tint);
+  SetFloatField(ref tinted, fields.ColorMultiplier, 1f);
+  SetFloatField(ref tinted, fields.FadeDuration, 0f);
 
   return tinted;
  }
 
- private static void TintColorField(ref object boxedStruct, Type type, string fieldName, Color tint)
+ private static void TintColorField(ref object boxedStruct, FieldInfo? field, Color tint)
  {
-  var field = type.GetField(fieldName, InstanceFlags);
   if (field?.FieldType != typeof(Color))
   {
    return;
   }
 
-  var original = (Color)field.GetValue(boxedStruct);
-    var next = new Color(tint.r, tint.g, tint.b, tint.a);
+  var next = new Color(tint.r, tint.g, tint.b, tint.a);
   field.SetValue(boxedStruct, next);
  }
 
- private static void SetFloatField(ref object boxedStruct, Type type, string fieldName, float value)
+ private static void SetFloatField(ref object boxedStruct, FieldInfo? field, float value)
  {
-  var field = type.GetField(fieldName, InstanceFlags);
   if (field?.FieldType != typeof(float))
   {
    return;
@@ -2609,124 +2795,230 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
   "_color1",
  };
 
-   private sealed class ColorMemberSnapshot
+ private sealed class ColorMemberSnapshot
+ {
+  public List<ColorMemberEntry> Entries { get; } = new();
+ }
+
+ private sealed class ColorMemberEntry
+ {
+  public ColorMemberAccessor Accessor { get; set; } = null!;
+
+  public Color OriginalColor { get; set; }
+ }
+
+ private static List<ColorMemberAccessor> GetColorMemberAccessors(Type type)
+ {
+  lock (ReflectionCacheLock)
+  {
+   if (ColorMemberAccessorCache.TryGetValue(type, out var cached))
    {
-    public List<ColorMemberEntry> Entries { get; } = new();
+    return cached;
    }
 
-   private sealed class ColorMemberEntry
+   var accessors = new List<ColorMemberAccessor>();
+   foreach (var name in ColorMemberNames)
    {
-    public string Name { get; set; } = string.Empty;
-
-    public bool IsProperty { get; set; }
-
-    public Color OriginalColor { get; set; }
-   }
-
-   private static ColorMemberSnapshot? CaptureColorMemberSnapshot(Component component)
-   {
-    var type = component.GetType();
-    var snapshot = new ColorMemberSnapshot();
-
-    foreach (var name in ColorMemberNames)
+    var property = type.GetProperty(name, InstanceFlags);
+    if (property?.PropertyType == typeof(Color) && property.GetIndexParameters().Length == 0)
     {
-     var prop = type.GetProperty(name, InstanceFlags);
-     if (prop?.CanRead == true && prop.CanWrite && prop.PropertyType == typeof(Color))
+     accessors.Add(new ColorMemberAccessor
      {
-      snapshot.Entries.Add(new ColorMemberEntry
-      {
-       Name = name,
-       IsProperty = true,
-       OriginalColor = (Color)prop.GetValue(component),
-      });
-      continue;
-     }
+      Property = property,
+     });
 
-     var field = type.GetField(name, InstanceFlags);
-     if (field?.FieldType == typeof(Color))
-     {
-      snapshot.Entries.Add(new ColorMemberEntry
-      {
-       Name = name,
-       IsProperty = false,
-       OriginalColor = (Color)field.GetValue(component),
-      });
-     }
-    }
-
-    return snapshot.Entries.Count == 0 ? null : snapshot;
-   }
-
-   private static bool TryApplyTintFromSnapshot(Component component, ColorMemberSnapshot snapshot, Color tint)
-   {
-    var wroteAny = false;
-    foreach (var entry in snapshot.Entries)
-    {
-       var next = new Color(tint.r, tint.g, tint.b, tint.a);
-     if (TrySetColorMemberByName(component, entry.Name, entry.IsProperty, next))
-     {
-      wroteAny = true;
-     }
-    }
-
-    return wroteAny;
-   }
-
-   private static bool RestoreColorMemberSnapshot(Component component, ColorMemberSnapshot snapshot)
-   {
-    var wroteAny = false;
-    foreach (var entry in snapshot.Entries)
-    {
-     if (TrySetColorMemberByName(component, entry.Name, entry.IsProperty, entry.OriginalColor))
-     {
-      wroteAny = true;
-     }
-    }
-
-    return wroteAny;
-   }
-
-   private static bool TrySetColorMemberByName(Component component, string name, bool isProperty, Color color)
-   {
-    var type = component.GetType();
-    if (isProperty)
-    {
-     var prop = type.GetProperty(name, InstanceFlags);
-     if (prop?.CanWrite == true && prop.PropertyType == typeof(Color))
-     {
-      prop.SetValue(component, color);
-      return true;
-     }
-
-     return false;
+     continue;
     }
 
     var field = type.GetField(name, InstanceFlags);
     if (field?.FieldType == typeof(Color))
     {
-     field.SetValue(component, color);
-     return true;
+     accessors.Add(new ColorMemberAccessor
+     {
+      Field = field,
+     });
+    }
+   }
+
+   ColorMemberAccessorCache[type] = accessors;
+   return accessors;
+  }
+ }
+
+ private static SelectableColorsAccessor? GetSelectableColorsAccessor(Type type)
+ {
+  lock (ReflectionCacheLock)
+  {
+   if (SelectableColorsAccessorCache.TryGetValue(type, out var cached))
+   {
+    return cached;
+   }
+
+   PropertyInfo? readProperty = null;
+   PropertyInfo? writeProperty = null;
+   FieldInfo? field = null;
+   Type? colorsType = null;
+
+   var property = type.GetProperty("colors", InstanceFlags);
+   if (property is not null)
+   {
+    if (property.CanRead)
+    {
+      readProperty = property;
+      colorsType = property.PropertyType;
     }
 
-    return false;
+    if (property.CanWrite)
+    {
+      writeProperty = property;
+      colorsType ??= property.PropertyType;
+    }
    }
+
+   if (colorsType is null)
+   {
+    for (var cursor = type; cursor is not null && field is null; cursor = cursor.BaseType)
+    {
+     field = cursor.GetField("m_Colors", InstanceFlags)
+      ?? cursor.GetField("_colors", InstanceFlags)
+      ?? cursor.GetField("colors", InstanceFlags);
+    }
+
+    colorsType = field?.FieldType;
+   }
+
+   SelectableColorsAccessor? accessor = null;
+   if (colorsType is not null)
+   {
+    accessor = new SelectableColorsAccessor
+    {
+     ColorsType = colorsType,
+     ReadProperty = readProperty,
+     WriteProperty = writeProperty,
+     Field = field,
+    };
+   }
+
+   SelectableColorsAccessorCache[type] = accessor;
+   return accessor;
+  }
+ }
+
+ private static ColorBlockFieldAccessor GetColorBlockFieldAccessor(Type colorBlockType)
+ {
+  lock (ReflectionCacheLock)
+  {
+   if (ColorBlockFieldAccessorCache.TryGetValue(colorBlockType, out var cached))
+   {
+    return cached;
+   }
+
+   var accessor = new ColorBlockFieldAccessor
+   {
+    NormalColor = colorBlockType.GetField("normalColor", InstanceFlags),
+    HighlightedColor = colorBlockType.GetField("highlightedColor", InstanceFlags),
+    PressedColor = colorBlockType.GetField("pressedColor", InstanceFlags),
+    SelectedColor = colorBlockType.GetField("selectedColor", InstanceFlags),
+    DisabledColor = colorBlockType.GetField("disabledColor", InstanceFlags),
+    ColorMultiplier = colorBlockType.GetField("colorMultiplier", InstanceFlags),
+    FadeDuration = colorBlockType.GetField("fadeDuration", InstanceFlags),
+   };
+
+   ColorBlockFieldAccessorCache[colorBlockType] = accessor;
+   return accessor;
+  }
+ }
+
+ private static ColorMemberSnapshot? CaptureColorMemberSnapshot(Component component)
+ {
+  var snapshot = new ColorMemberSnapshot();
+  foreach (var accessor in GetColorMemberAccessors(component.GetType()))
+  {
+   if (!TryGetColorByAccessor(component, accessor, out var originalColor))
+   {
+    continue;
+   }
+
+   snapshot.Entries.Add(new ColorMemberEntry
+   {
+    Accessor = accessor,
+    OriginalColor = originalColor,
+   });
+  }
+
+  return snapshot.Entries.Count == 0 ? null : snapshot;
+ }
+
+ private static bool TryApplyTintFromSnapshot(Component component, ColorMemberSnapshot snapshot, Color tint)
+ {
+  var wroteAny = false;
+  var next = new Color(tint.r, tint.g, tint.b, tint.a);
+  foreach (var entry in snapshot.Entries)
+  {
+   if (TrySetColorByAccessor(component, entry.Accessor, next))
+   {
+    wroteAny = true;
+   }
+  }
+
+  return wroteAny;
+ }
+
+ private static bool RestoreColorMemberSnapshot(Component component, ColorMemberSnapshot snapshot)
+ {
+  var wroteAny = false;
+  foreach (var entry in snapshot.Entries)
+  {
+   if (TrySetColorByAccessor(component, entry.Accessor, entry.OriginalColor))
+   {
+    wroteAny = true;
+   }
+  }
+
+  return wroteAny;
+ }
+
+ private static bool TryGetColorByAccessor(Component component, ColorMemberAccessor accessor, out Color color)
+ {
+  if (accessor.Property?.CanRead == true && accessor.Property.PropertyType == typeof(Color))
+  {
+   color = (Color)accessor.Property.GetValue(component);
+   return true;
+  }
+
+  if (accessor.Field?.FieldType == typeof(Color))
+  {
+   color = (Color)accessor.Field.GetValue(component);
+   return true;
+  }
+
+  color = default;
+  return false;
+ }
+
+ private static bool TrySetColorByAccessor(Component component, ColorMemberAccessor accessor, Color color)
+ {
+  if (accessor.Property?.CanWrite == true && accessor.Property.PropertyType == typeof(Color))
+  {
+   accessor.Property.SetValue(component, color);
+   return true;
+  }
+
+  if (accessor.Field?.FieldType == typeof(Color))
+  {
+   accessor.Field.SetValue(component, color);
+   return true;
+  }
+
+  return false;
+ }
 
  private static bool TryGetColorMember(Component component, out Color color)
  {
-  var type = component.GetType();
-  foreach (var name in ColorMemberNames)
+  foreach (var accessor in GetColorMemberAccessors(component.GetType()))
   {
-   var prop = type.GetProperty(name, InstanceFlags);
-   if (prop?.CanRead == true && prop.PropertyType == typeof(Color))
+   if (TryGetColorByAccessor(component, accessor, out color))
    {
-    color = (Color)prop.GetValue(component);
-    return true;
-   }
-
-   var field = type.GetField(name, InstanceFlags);
-   if (field?.FieldType == typeof(Color))
-   {
-    color = (Color)field.GetValue(component);
     return true;
    }
   }
@@ -2737,22 +3029,11 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
 
  private static bool TrySetColorMember(Component component, Color color)
  {
-  var type = component.GetType();
   var wroteAny = false;
-  foreach (var name in ColorMemberNames)
+  foreach (var accessor in GetColorMemberAccessors(component.GetType()))
   {
-   var prop = type.GetProperty(name, InstanceFlags);
-   if (prop?.CanWrite == true && prop.PropertyType == typeof(Color))
+   if (TrySetColorByAccessor(component, accessor, color))
    {
-    prop.SetValue(component, color);
-    wroteAny = true;
-    continue;
-   }
-
-   var field = type.GetField(name, InstanceFlags);
-   if (field?.FieldType == typeof(Color))
-   {
-    field.SetValue(component, color);
     wroteAny = true;
    }
   }
@@ -2901,6 +3182,10 @@ private static MonoBehaviour? FindStandardLevelDetailViewController(bool require
 
   _cts?.Dispose();
   _cts = null;
+
+  _componentCacheByTypeName.Clear();
+  _cachedGameScenesManager = null;
+  ClearSnapshotCache();
 
    if (_curvedTextObject is not null)
     {
