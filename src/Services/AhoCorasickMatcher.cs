@@ -44,19 +44,14 @@ internal sealed class AhoCorasickMatcher
   {
    var c = char.ToUpperInvariant(raw);
 
-   while (state != 0 && !_nodes[state].Next.ContainsKey(c))
+     var hasTransition = _nodes[state].Next.TryGetValue(c, out var next);
+     while (state != 0 && !hasTransition)
    {
     state = _nodes[state].Failure;
+        hasTransition = _nodes[state].Next.TryGetValue(c, out next);
    }
 
-   if (_nodes[state].Next.TryGetValue(c, out var next))
-   {
-    state = next;
-   }
-   else
-   {
-    state = 0;
-   }
+     state = hasTransition ? next : 0;
 
    var outputs = _nodes[state].Outputs;
    for (var i = 0; i < outputs.Count; i++)
@@ -109,19 +104,14 @@ internal sealed class AhoCorasickMatcher
     var next = transition.Value;
 
     var failure = nodes[state].Failure;
-    while (failure != 0 && !nodes[failure].Next.ContainsKey(c))
+        var hasFallback = nodes[failure].Next.TryGetValue(c, out var fallback);
+        while (failure != 0 && !hasFallback)
     {
      failure = nodes[failure].Failure;
+         hasFallback = nodes[failure].Next.TryGetValue(c, out fallback);
     }
 
-    if (nodes[failure].Next.TryGetValue(c, out var fallback))
-    {
-     nodes[next].Failure = fallback;
-    }
-    else
-    {
-     nodes[next].Failure = 0;
-    }
+        nodes[next].Failure = hasFallback ? fallback : 0;
 
     if (nodes[nodes[next].Failure].Outputs.Count > 0)
     {

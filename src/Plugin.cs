@@ -134,19 +134,22 @@ public sealed class AttentionPluginRuntime
    return null;
   }
 
+  var canShow = await _visibilityPolicy.ShouldShowAsync(cancellationToken).ConfigureAwait(false);
+  if (!canShow)
+  {
+   CleanupExpiredDescriptionCache();
+   return null;
+  }
+
   string? result = null;
   var excludedCategories = GetExcludedCategoriesForMatching();
 
   await ResolveBeatSaverMetadataIfNeededAsync(context, excludedCategories, cancellationToken).ConfigureAwait(false);
 
-  var canShow = await _visibilityPolicy.ShouldShowAsync(cancellationToken).ConfigureAwait(false);
-  if (canShow)
+  var matches = _matcherIndex.FindMatches(context, excludedCategories);
+  if (matches.Count > 0)
   {
-   var matches = _matcherIndex.FindMatches(context, excludedCategories);
-   if (matches.Count > 0)
-   {
-    result = string.Join("\n", matches.Select(x => AttentionLineFormatter.Format(x.Category, x.Reason, _config.DisplayMode, _config.CategoryPrefixes)));
-   }
+   result = string.Join("\n", matches.Select(x => AttentionLineFormatter.Format(x.Category, x.Reason, _config.DisplayMode, _config.CategoryPrefixes)));
   }
 
   // 判定処理の最後で期限切れを掃除する（アクセス時のTTL延長は維持）。
