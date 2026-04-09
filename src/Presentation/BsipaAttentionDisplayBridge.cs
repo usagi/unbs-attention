@@ -21,6 +21,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private const float TintMaintenanceIntervalSeconds = 0.1f;
  private const float TintDriftBoostSeconds = 0.35f;
  private const float ForceTintPassDurationSeconds = 0.6f;
+ private const float ConfirmStateGuardProbeIntervalSeconds = 0.1f;
 
  private static readonly object ReflectionCacheLock = new();
  private static readonly Dictionary<Type, List<ColorMemberAccessor>> ColorMemberAccessorCache = new();
@@ -163,6 +164,8 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
  private bool _playBypassOnce;
  private bool _playInterceptDisabledDueToError;
  private float _playConfirmArmedUntil;
+ private string? _confirmGuardLevelId;
+ private float _nextConfirmGuardProbeAt = float.MinValue;
  private Transform? _lastTintTargetRoot;
  private bool _hasAppliedTintState;
  private bool _lastAppliedAttentionState;
@@ -229,6 +232,14 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
   {
    _playConfirmModalVisible = false;
     RequestTintRefresh();
+  }
+  else if (_playConfirmModalVisible && now >= _nextConfirmGuardProbeAt)
+  {
+   _nextConfirmGuardProbeAt = now + ConfirmStateGuardProbeIntervalSeconds;
+   if (HasSelectionChangedSinceConfirmArmed())
+   {
+    ClearPlayConfirmStateOnSelectionChanged();
+   }
   }
 
   if (Interlocked.Exchange(ref _pendingAttachRequest, 0) == 1)
@@ -648,6 +659,7 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    return;
   }
 
+  ClearPlayConfirmStateOnSelectionChanged();
   RequestAttachAndRefresh();
  }
 
@@ -658,7 +670,95 @@ public sealed class BsipaAttentionDisplayBridge : MonoBehaviour
    return;
   }
 
+  ClearPlayConfirmStateOnSelectionChanged();
   RequestAttachAndRefresh();
+ }
+
+ private void ClearPlayConfirmStateOnSelectionChanged()
+ {
+  var hadConfirmState = _playConfirmModalVisible || _lastConfirmLabelActive || IsConfirmLabelTextVisible();
+  if (!hadConfirmState)
+  {
+   return;
+  }
+
+  _playConfirmModalVisible = false;
+  _playConfirmArmedUntil = 0f;
+  _playBypassOnce = false;
+  _confirmGuardLevelId = null;
+  _nextConfirmGuardProbeAt = float.MinValue;
+  RestorePlayButtonLabelText();
+  InvalidatePlayButtonTintState();
+  RequestTintRefresh();
+  LogInfo("[UNBS] Cleared play confirmation state due to menu selection change.");
+ }
+
+ private bool HasSelectionChangedSinceConfirmArmed()
+ {
+  var currentLevelId = TryGetCurrentSelectionLevelId();
+  if (string.IsNullOrWhiteSpace(currentLevelId))
+  {
+   return false;
+  }
+
+  if (string.IsNullOrWhiteSpace(_confirmGuardLevelId))
+  {
+   _confirmGuardLevelId = currentLevelId;
+   return false;
+  }
+
+  var changed = !string.Equals(_confirmGuardLevelId, currentLevelId, StringComparison.Ordinal);
+  if (changed)
+  {
+   LogInfo("[UNBS] Confirm guard detected selection change: " + _confirmGuardLevelId + " -> " + currentLevelId);
+  }
+
+  return changed;
+ }
+
+ private string? TryGetCurrentSelectionLevelId()
+ {
+  var level = FindCurrentBeatmapLevel();
+  if (level is null)
+  {
+   return null;
+  }
+
+  var snapshot = BuildSnapshot(level);
+    var levelId = snapshot?.LevelId;
+    return string.IsNullOrWhiteSpace(levelId) ? null : levelId;
+ }
+
+ private bool IsConfirmLabelTextVisible()
+ {
+  if (_playLabelTintTarget is null || !_playLabelOriginalTextCaptured)
+  {
+   return false;
+  }
+
+  if (!TryGetTextFromComponent(_playLabelTintTarget, out var currentText))
+  {
+   return false;
+  }
+
+  var originalText = _playLabelOriginalText ?? string.Empty;
+  if (string.Equals(currentText, originalText, StringComparison.Ordinal))
+  {
+   return false;
+  }
+
+  var confirmPrefix = GetPlayButtonConfirmText() + "(";
+  return currentText.StartsWith(confirmPrefix, StringComparison.Ordinal);
+ }
+
+ private void RestorePlayButtonLabelText()
+ {
+  if (_playLabelTintTarget is null || !_playLabelOriginalTextCaptured || _playLabelOriginalText is null)
+  {
+   return;
+  }
+
+  SetTextOnComponent(_playLabelTintTarget, _playLabelOriginalText);
  }
 
  private void OnRuntimeDataRevisionChanged(long revision)
@@ -1030,6 +1130,11 @@ private void ApplyDisplayToCurvedText(bool runVisualMaintenance, bool runTintMai
    return;
   }
 
+    if (_playConfirmModalVisible && HasSelectionChangedSinceConfirmArmed())
+    {
+     ClearPlayConfirmStateOnSelectionChanged();
+    }
+
   var attentionActive = !string.IsNullOrWhiteSpace(_displayText);
   if (!attentionActive)
   {
@@ -1058,6 +1163,8 @@ private void ApplyDisplayToCurvedText(bool runVisualMaintenance, bool runTintMai
   _playConfirmModalVisible = true;
     var durationSeconds = GetPlayButtonConfirmDurationSeconds();
     _playConfirmArmedUntil = Time.unscaledTime + durationSeconds;
+    _confirmGuardLevelId = TryGetCurrentSelectionLevelId();
+    _nextConfirmGuardProbeAt = Time.unscaledTime;
     RequestTintRefresh();
       LogInfo("[UNBS] Play confirmation armed. Press Play again within " + durationSeconds + " seconds to start.");
  }
@@ -1200,6 +1307,8 @@ private void ApplyDisplayToCurvedText(bool runVisualMaintenance, bool runTintMai
   _playInterceptOnClickEvent = null;
   _playInterceptInstalled = false;
   _playBypassOnce = false;
+  _confirmGuardLevelId = null;
+  _nextConfirmGuardProbeAt = float.MinValue;
     _playConfirmArmedUntil = 0f;
  }
 
@@ -1885,9 +1994,14 @@ private void UpdatePlayButtonTint(bool attentionActive, bool allowDriftCheck, bo
     return;
    }
 
-   var dataRevision = _runtime!.GetDataRevision();
+  var dataRevision = _runtime!.GetDataRevision();
+  var snapshotChanged = !IsSnapshotEquivalent(snapshot);
+  if (snapshotChanged)
+  {
+   ClearPlayConfirmStateOnSelectionChanged();
+  }
 
-    if (IsSnapshotEquivalent(snapshot)
+   if (!snapshotChanged
       && _lastDataRevision == dataRevision)
    {
     return;
